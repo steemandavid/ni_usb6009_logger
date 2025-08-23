@@ -1,0 +1,3 @@
+nidaqmx
+numpy
+openpyxl ; extra == "excel"

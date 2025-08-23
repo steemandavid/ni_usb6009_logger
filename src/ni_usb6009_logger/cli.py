@@ -1,0 +1,418 @@
+#!/usr/bin/env python3
+# ---------------------------------------------------------------------------
+# NI USB-6009 Data Logger (CSV/XLSX) with Live Progress and Safe Filenames. Works with analog and digital inputs.
+#
+# 2025 David Steeman
+#
+#
+#
+# Dependencies (install inside your virtual environment):
+#
+#   Download NI-DAQmx from NI's website and install.
+#
+#   pip install nidaqmx
+#   pip install numpy
+#
+# Excel (.xlsx) output additionally requires:
+#
+#   pip install openpyxl
+#
+# Tested with Python 3.10/3.11 on Windows with NI-DAQmx runtime installed.
+# ---------------------------------------------------------------------------
+# Example usage:
+#
+# 1) Basic logging (AI only, CSV, auto-named file in the fixed logs folder):
+#    ni_usb6009_logger --device Dev1 --channels ai0 --rate 1000 --term RSE --print-first 10
+#
+# 2) AI + DI logging (two AI, 4 DI lines on port0), custom CSV:
+#    ni_usb6009_logger --device Dev1 --channels ai0,ai1 --digital port0/line0:3 --rate 100 --term RSE --outfile .\logs\run.csv --print-first 10
+#
+# 3) Log to Excel (.xlsx):
+#    ni_usb6009_logger --device Dev1 --channels ai0,ai1 --digital port0/line0:7 --rate 500 --term RSE --outfile .\logs\run.xlsx --print-first 10
+#
+# 4) Timed run (auto-stop after 30s):
+#    ni_usb6009_logger --device Dev1 --channels ai0 --rate 1000 --duration 30 --print-first 10
+#
+# 5) Differential wiring example:
+#    ni_usb6009_logger --device Dev1 --channels ai0,ai1 --rate 1000 --term DIFF --print-first 10
+#
+# 6) Show live counter or progress bar:
+#    # Counter (default when no --duration):
+#    ni_usb6009_logger --device Dev1 --channels ai0 --rate 1000 --term RSE --progress counter --print-first 10
+#    # Progress bar (useful with duration):
+#    ni_usb6009_logger --device Dev1 --channels ai0 --rate 1000 --term RSE --duration 30 --progress bar --print-first 10
+#
+# File naming when --outfile is omitted:
+#   .\logs\ni_<device>_<YYYYmmdd_HHMMSS>.<csv|xlsx>
+# ---------------------------------------------------------------------------
+
+import argparse, time, csv, signal, sys
+from pathlib import Path
+import numpy as np
+
+import nidaqmx
+from nidaqmx.constants import AcquisitionType, TerminalConfiguration, LineGrouping, TaskMode
+from nidaqmx.stream_readers import AnalogMultiChannelReader
+
+# ---------- Writers ----------
+class BaseWriter:
+    def write_header(self, header): ...
+    def write_row(self, row): ...
+    def flush(self): ...
+    def close(self): ...
+
+class CSVWriter(BaseWriter):
+    def __init__(self, path: Path):
+        self._f = path.open("w", newline="")
+        self._writer = csv.writer(self._f)
+    def write_header(self, header): self._writer.writerow(header); self._f.flush()
+    def write_row(self, row): self._writer.writerow(row)
+    def flush(self): self._f.flush()
+    def close(self):
+        try: self._f.flush()
+        finally: self._f.close()
+
+class XLSXWriter(BaseWriter):
+    def __init__(self, path: Path, sheet_name="DAQ"):
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            print("Excel output requires 'openpyxl'. Install with: pip install openpyxl")
+            raise
+        self._path = path
+        self._wb = Workbook(write_only=True)  # write-only keeps memory low
+        self._ws = self._wb.create_sheet(title=sheet_name)
+        if len(self._wb._sheets) > 1 and self._wb._sheets[0].title != sheet_name:
+            self._wb.remove(self._wb._sheets[0])
+    def write_header(self, header): self._ws.append(header)
+    def write_row(self, row): self._ws.append(row)
+    def flush(self): pass  # openpyxl writes on save
+    def close(self):
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._wb.save(str(self._path))
+
+# ---------- DAQ setup ----------
+TERM_MAP = {
+    "RSE":  TerminalConfiguration.RSE,
+    "NRSE": TerminalConfiguration.NRSE,
+    "DIFF": TerminalConfiguration.DIFF,  # use DIFF (not DIFFERENTIAL)
+}
+
+# ---------- argparse / --help ----------
+def parse_args():
+    class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter):
+        pass
+
+    desc = (
+        "Log NI USB-6009 analog inputs (AI) and optional digital inputs (DI) to CSV or XLSX.\n"
+        "AI is hardware-timed; DI on USB-6009 is static (snapshotted once per AI chunk)."
+    )
+
+    epilog = (
+        "Digital lines syntax examples:\n"
+        "  --digital port0/line0:7         # all 8 lines on port0\n"
+        "  --digital port0/line0,port0/line3\n"
+        "\n"
+        "Tips:\n"
+        "  • Lower --chunk to snapshot DI more often (e.g., --chunk 100 at 1 kHz ≈ 10 DI snaps/sec)\n"
+        "  • Omit --outfile to auto-save under .\\logs with timestamped filename (no-overwrite).\n"
+        "  • Use --print-first N to echo the first N logged rows to the console for sanity checking.\n"
+    )
+
+    p = argparse.ArgumentParser(
+        description=desc,
+        epilog=epilog,
+        formatter_class=_HelpFormatter,
+    )
+
+    # Device & channels
+    p.add_argument("--device", default="Dev1",
+                   help="NI-DAQmx device name/alias as shown in NI MAX (e.g., Dev1).")
+    p.add_argument("--channels",
+                   required=True,
+                   help="Comma-separated AI channels relative to device, e.g. 'ai0' or 'ai0,ai1'. "
+                        "At least one AI is required (USB-6009 AI is used to drive hardware timing).")
+    p.add_argument("--digital", default="",
+                   help="Optional DI lines relative to device. Accepts comma list and ranges, e.g. "
+                        "'port0/line0:7' or 'port0/line0,port0/line3'. DI is snapshotted once per AI chunk.")
+
+    # Sampling / analog config
+    p.add_argument("--rate", type=float, default=1000.0,
+                   help="Analog sample rate per AI channel in Hz. "
+                        "USB-6009 aggregate max ≈ 48 kS/s across all AI channels.")
+    p.add_argument("--chunk", type=int, default=1000,
+                   help="Samples per read per AI channel. Also sets DI snapshot cadence (once per chunk).")
+    p.add_argument("--vmin", type=float, default=-10.0,
+                   help="Minimum expected AI voltage (V).")
+    p.add_argument("--vmax", type=float, default=10.0,
+                   help="Maximum expected AI voltage (V).")
+    p.add_argument("--term", choices=["RSE","NRSE","DIFF"], default="RSE",
+                   help="AI terminal configuration: RSE, NRSE, or DIFF.")
+
+    # Output / formatting
+    p.add_argument("--outfile", default="",
+                   help="Output file path. If omitted, an auto-named file is created under .\\logs using the pattern "
+                        "ni_<device>_<YYYYmmdd_HHMMSS>.<csv|xlsx>. Existing files are never overwritten: "
+                        "a suffix _1, _2, ... is appended instead.")
+    p.add_argument("--format", choices=["csv","xlsx"], default=None,
+                   help="Output format. If omitted, inferred from --outfile extension, else CSV.")
+
+    # Run control / UI
+    p.add_argument("--duration", type=float, default=None,
+                   help="Seconds to run. Omit to run until Ctrl+C. When provided, progress defaults to a bar.")
+    p.add_argument("--progress", choices=["auto","none","counter","bar"], default="auto",
+                   help="Progress display mode. 'auto' = bar if --duration set, else counter.")
+    p.add_argument("--update-interval", type=float, default=0.5,
+                   help="Seconds between progress updates (counter or bar refresh).")
+    p.add_argument("--print-first", type=int, default=0,
+                   help="Print the first N logged rows to the console for a quick sanity check.")
+
+    return p.parse_args()
+
+# ---------- Safe filename helper ----------
+def safe_path(path: Path) -> Path:
+    """Ensure we don't overwrite an existing file by appending _1, _2, ..."""
+    if not path.exists():
+        return path
+    stem, suffix, parent = path.stem, path.suffix, path.parent
+    i = 1
+    while True:
+        candidate = parent / f"{stem}_{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+        i += 1
+
+def infer_output(args):
+    if args.format:
+        fmt = args.format
+    elif args.outfile:
+        ext = Path(args.outfile).suffix.lower()
+        fmt = "xlsx" if ext == ".xlsx" else "csv"
+    else:
+        fmt = "csv"
+
+    if args.outfile:
+        out = Path(args.outfile)
+        if fmt == "xlsx" and out.suffix.lower() != ".xlsx":
+            out = out.with_suffix(".xlsx")
+        if fmt == "csv" and out.suffix.lower() != ".csv":
+            out = out.with_suffix(".csv")
+    else:
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        base = f"ni_{args.device}_{ts}"
+        folder = Path(r".\logs")
+        folder.mkdir(parents=True, exist_ok=True)
+        out = folder / f"{base}.{fmt}"
+
+    out = safe_path(out)
+    return fmt, out
+
+# ---------- Digital line parsing ----------
+def expand_digital_spec(spec: str):
+    if not spec.strip():
+        return []
+    parts = []
+    for token in [t.strip() for t in spec.split(",") if t.strip()]:
+        if ":" in token:
+            port, linerange = token.split("/line", 1)
+            a, b = linerange.split(":")
+            a, b = int(a), int(b)
+            if b < a: a, b = b, a
+            for i in range(a, b+1):
+                parts.append(f"{port}/line{i}")
+        else:
+            parts.append(token)
+    uniq, seen = [], set()
+    for p in parts:
+        if p not in seen:
+            uniq.append(p); seen.add(p)
+    return uniq
+
+# ---------- Progress helpers ----------
+def format_rate(samples_per_sec):
+    if samples_per_sec >= 1e6: return f"{samples_per_sec/1e6:.2f} MS/s"
+    if samples_per_sec >= 1e3: return f"{samples_per_sec/1e3:.2f} kS/s"
+    return f"{samples_per_sec:.0f} S/s"
+
+def progress_line_counter(samples_total, ch_count, elapsed, inst_rate):
+    agg_samples = samples_total * ch_count
+    rate_str = format_rate(inst_rate * ch_count)
+    return f"[{elapsed:6.1f}s] samples/ch: {samples_total:,} | total: {agg_samples:,} | ~{rate_str}"
+
+def progress_line_bar(elapsed, duration, width=30):
+    frac = min(max(elapsed / duration, 0.0), 1.0) if duration else 0.0
+    filled = int(frac * width)
+    bar = "█" * filled + " " * (width - filled)
+    percent = int(frac * 100)
+    remaining = max(duration - elapsed, 0.0)
+    return f"[{bar}] {percent:3d}% | elapsed {elapsed:5.1f}s | ETA {remaining:5.1f}s"
+
+# ---------- Main ----------
+def main():
+    args = parse_args()
+    ch_short = [c.strip() for c in args.channels.split(",") if c.strip()]
+    if not ch_short:
+        print("At least one analog input channel is required.")
+        sys.exit(1)
+    ch_full = [f"{args.device}/{c}" for c in ch_short]
+    ch_count = len(ch_full)
+
+    di_lines = expand_digital_spec(args.digital)
+    di_headers = [("di_" + ln.replace("/", "_")).replace(":", "_") for ln in di_lines]
+
+    fmt, out = infer_output(args)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    mode = args.progress
+    if mode == "auto":
+        mode = "bar" if args.duration and args.duration > 0 else "counter"
+
+    print("Starting logger… (initializing tasks)")
+    print(f"Output → {out}   Format={fmt.upper()}")
+    print(f"AI channels: {', '.join(ch_full)} | term={args.term} | range=[{args.vmin},{args.vmax}] V | rate={args.rate} Hz | chunk={args.chunk}")
+    if di_lines:
+        print(f"DI lines: {', '.join(di_lines)} (snapshotted per chunk)")
+    if args.duration:
+        print(f"Duration: ~{args.duration} s (Ctrl+C to stop early)")
+    if args.print_first > 0:
+        print(f"Will print the first {args.print_first} rows below as they are logged.")
+
+    stop = False
+    def _sigint(_sig, _frame):
+        nonlocal stop
+        stop = True
+        sys.stdout.write("\nStopping... (closing output)\n")
+        sys.stdout.flush()
+    signal.signal(signal.SIGINT, _sigint)
+
+    writer = CSVWriter(out) if fmt == "csv" else XLSXWriter(out, sheet_name="DAQ")
+    samples_total = 0
+    next_status_time = 0.0
+    last_ts = time.time()
+    last_samples = 0
+
+    remaining_print = max(0, int(args.print_first))
+
+    try:
+        print("Creating AI task…")
+        with nidaqmx.Task() as ai_task:
+            for ch in ch_full:
+                ai_task.ai_channels.add_ai_voltage_chan(
+                    ch, min_val=args.vmin, max_val=args.vmax,
+                    terminal_config=TERM_MAP[args.term]
+                )
+            buf_samps = int(max(args.rate * 10, args.chunk * 2))
+            ai_task.timing.cfg_samp_clk_timing(
+                rate=args.rate,
+                sample_mode=AcquisitionType.CONTINUOUS,
+                samps_per_chan=buf_samps
+            )
+            print("Verifying AI task…")
+            ai_task.control(TaskMode.TASK_VERIFY)
+
+            di_task = None
+            if di_lines:
+                print("Creating DI task…")
+                di_task = nidaqmx.Task()
+                for ln in di_lines:
+                    di_task.di_channels.add_di_chan(
+                        f"{args.device}/{ln}",
+                        line_grouping=LineGrouping.CHAN_PER_LINE
+                    )
+                print("Verifying DI task…")
+                di_task.control(TaskMode.TASK_VERIFY)
+
+            ai_reader = AnalogMultiChannelReader(ai_task.in_stream)
+            ai_buf = np.zeros((ch_count, args.chunk), dtype=np.float64)
+
+            header = ["timestamp_iso", "sample_index"] + ch_short + di_headers
+            writer.write_header(header)
+
+            print("Starting tasks…")
+            ai_task.start()
+            if di_task:
+                di_task.start()
+            print("Running. Press Ctrl+C to stop.")
+
+            # Preview banner/header AFTER start messages so nothing splits them from rows
+            if remaining_print > 0:
+                print("(…start of preview…)")
+                hdr = ["timestamp_iso", "idx"] + ch_short + di_headers
+                print(" | ".join(hdr))
+                sys.stdout.flush()
+
+            t0 = time.time()
+            last_ts = t0
+            next_status_time = t0 + args.update_interval
+
+            while not stop:
+                now = time.time()
+                if args.duration and (now - t0) >= args.duration:
+                    break
+
+                ai_reader.read_many_sample(ai_buf, number_of_samples_per_channel=args.chunk, timeout=10.0)
+
+                if di_task:
+                    di_vals = di_task.read()
+                    di_vals = [1 if bool(v) else 0 for v in di_vals]
+                else:
+                    di_vals = []
+
+                chunk_start = time.time()
+                for i in range(args.chunk):
+                    ts = chunk_start + (i / args.rate)
+                    ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts)) + f".{int((ts%1)*1e6):06d}"
+                    row_vals = ai_buf[:, i].tolist()
+                    row = [ts_iso, samples_total + i] + row_vals + di_vals
+                    writer.write_row(row)
+
+                    if remaining_print > 0:
+                        ai_str = [f"{v:.6f}" for v in row_vals]
+                        di_str = [str(v) for v in di_vals]
+                        print(" | ".join([ts_iso, str(samples_total + i)] + ai_str + di_str))
+                        remaining_print -= 1
+                        if remaining_print == 0:
+                            print("(…end of preview…)")
+                            sys.stdout.flush()
+
+                samples_total += args.chunk
+
+                if isinstance(writer, CSVWriter) and (samples_total % max(int(args.rate*5), 1) < args.chunk):
+                    writer.flush()
+
+                if now >= next_status_time:
+                    elapsed = now - t0
+                    dt = now - last_ts if (now - last_ts) > 0 else 1e-9
+                    inst_rate = (samples_total - last_samples) / dt
+                    if mode == "bar" and args.duration:
+                        line = progress_line_bar(elapsed, args.duration)
+                    else:
+                        line = progress_line_counter(samples_total, ch_count, elapsed, inst_rate)
+                    sys.stdout.write("\r" + line + " " * 10)
+                    sys.stdout.flush()
+                    last_ts = now
+                    last_samples = samples_total
+                    next_status_time = now + args.update_interval
+
+            if mode != "none":
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+
+            print("Stopping tasks…")
+            ai_task.stop()
+            if di_task:
+                di_task.stop()
+                di_task.close()
+
+    finally:
+        print("Closing output…")
+        writer.close()
+        print(f"Done. Wrote ~{samples_total} samples per AI channel to {out}")
+
+# ---------- CLI wrapper ----------
+def run():
+    """Entry-point wrapper so packaging can expose a `ni-logger` command."""
+    main()
+
+if __name__ == "__main__":
+    run()
