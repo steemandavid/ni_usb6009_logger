@@ -42,16 +42,30 @@
 #    # Progress bar (useful with duration):
 #    ni_usb6009_logger --device Dev1 --channels ai0 --rate 1000 --term RSE --duration 30 --progress bar --print-first 10
 #
+# 7) Calibration (screen-only; internal higher sample rate → moving average; output at --rate, default 1 Hz):
+#    ni_usb6009_logger --device Dev1 --channels ai0,ai1 --calibrate --calib-window 5 --calib-sample-rate 100 --rate 1
+#
+# 8) IGNITION (buzzer pre-warn, then fire relay) — DO lines forced LOW immediately at script start:
+#    ni_usb6009_logger --device Dev1 --channels ai0 --digital port0/line0:7 --rate 1000 --term RSE ^
+#      --ignite --buzzer-line port1/line0 --igniter-line port1/line1 --arm-seconds 15 --stabilize-seconds 1 --pulse-seconds 1
+#
+# Notes on digital inputs (USB-6009):
+# - DI is "static" (no hardware timing). This script snapshots DI once per analog chunk and repeats the snapshot
+#   for each row in that chunk. To increase the effective DI sampling frequency, lower --chunk.
+#
 # File naming when --outfile is omitted:
 #   .\logs\ni_<device>_<YYYYmmdd_HHMMSS>.<csv|xlsx>
 # ---------------------------------------------------------------------------
 
 import argparse, time, csv, signal, sys
+from collections import deque
 from pathlib import Path
 import numpy as np
 
 import nidaqmx
-from nidaqmx.constants import AcquisitionType, TerminalConfiguration, LineGrouping, TaskMode
+from nidaqmx.constants import (
+    AcquisitionType, TerminalConfiguration, LineGrouping, TaskMode
+)
 from nidaqmx.stream_readers import AnalogMultiChannelReader
 
 # ---------- Writers ----------
@@ -80,13 +94,13 @@ class XLSXWriter(BaseWriter):
             print("Excel output requires 'openpyxl'. Install with: pip install openpyxl")
             raise
         self._path = path
-        self._wb = Workbook(write_only=True)  # write-only keeps memory low
+        self._wb = Workbook(write_only=True)
         self._ws = self._wb.create_sheet(title=sheet_name)
         if len(self._wb._sheets) > 1 and self._wb._sheets[0].title != sheet_name:
             self._wb.remove(self._wb._sheets[0])
     def write_header(self, header): self._ws.append(header)
     def write_row(self, row): self._ws.append(row)
-    def flush(self): pass  # openpyxl writes on save
+    def flush(self): pass
     def close(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._wb.save(str(self._path))
@@ -95,7 +109,7 @@ class XLSXWriter(BaseWriter):
 TERM_MAP = {
     "RSE":  TerminalConfiguration.RSE,
     "NRSE": TerminalConfiguration.NRSE,
-    "DIFF": TerminalConfiguration.DIFF,  # use DIFF (not DIFFERENTIAL)
+    "DIFF": TerminalConfiguration.DIFF,
 }
 
 # ---------- argparse / --help ----------
@@ -105,7 +119,9 @@ def parse_args():
 
     desc = (
         "Log NI USB-6009 analog inputs (AI) and optional digital inputs (DI) to CSV or XLSX.\n"
-        "AI is hardware-timed; DI on USB-6009 is static (snapshotted once per AI chunk)."
+        "AI is hardware-timed; DI on USB-6009 is static (snapshotted once per AI chunk).\n"
+        "Calibration mode prints live values to the screen (no file) with optional moving-average filtering.\n"
+        "Ignition mode (logging only) actuates a buzzer pre-warning, then fires a relay after stabilization."
     )
 
     epilog = (
@@ -116,62 +132,71 @@ def parse_args():
         "Tips:\n"
         "  • Lower --chunk to snapshot DI more often (e.g., --chunk 100 at 1 kHz ≈ 10 DI snaps/sec)\n"
         "  • Omit --outfile to auto-save under .\\logs with timestamped filename (no-overwrite).\n"
-        "  • Use --print-first N to echo the first N logged rows to the console for sanity checking.\n"
+        "  • Use --calibrate for screen-only, filtered readout (internal --calib-sample-rate, prints at --rate).\n"
+        "  • Use --ignite with explicit DO lines for buzzer and relay."
     )
 
-    p = argparse.ArgumentParser(
-        description=desc,
-        epilog=epilog,
-        formatter_class=_HelpFormatter,
-    )
+    p = argparse.ArgumentParser(description=desc, epilog=epilog, formatter_class=_HelpFormatter)
 
     # Device & channels
-    p.add_argument("--device", default="Dev1",
-                   help="NI-DAQmx device name/alias as shown in NI MAX (e.g., Dev1).")
-    p.add_argument("--channels",
-                   required=True,
+    p.add_argument("--device", default="Dev1", help="NI-DAQmx device name/alias as shown in NI MAX (e.g., Dev1).")
+    p.add_argument("--channels", required=True,
                    help="Comma-separated AI channels relative to device, e.g. 'ai0' or 'ai0,ai1'. "
-                        "At least one AI is required (USB-6009 AI is used to drive hardware timing).")
+                        "At least one AI is required (USB-6009 AI provides the hardware timing).")
     p.add_argument("--digital", default="",
                    help="Optional DI lines relative to device. Accepts comma list and ranges, e.g. "
-                        "'port0/line0:7' or 'port0/line0,port0/line3'. DI is snapshotted once per AI chunk.")
+                        "'port0/line0:7' or 'port0/line0,port0/line3'. DI is snapshotted once per chunk.")
 
     # Sampling / analog config
-    p.add_argument("--rate", type=float, default=1000.0,
-                   help="Analog sample rate per AI channel in Hz. "
-                        "USB-6009 aggregate max ≈ 48 kS/s across all AI channels.")
+    p.add_argument("--rate", type=float, default=None,
+                   help="Analog output/print rate in Hz. Default is 1000 for logging, or 1 for --calibrate if not specified.")
     p.add_argument("--chunk", type=int, default=1000,
-                   help="Samples per read per AI channel. Also sets DI snapshot cadence (once per chunk).")
-    p.add_argument("--vmin", type=float, default=-10.0,
-                   help="Minimum expected AI voltage (V).")
-    p.add_argument("--vmax", type=float, default=10.0,
-                   help="Maximum expected AI voltage (V).")
-    p.add_argument("--term", choices=["RSE","NRSE","DIFF"], default="RSE",
-                   help="AI terminal configuration: RSE, NRSE, or DIFF.")
+                   help="Samples per read per AI channel (logging mode). Also sets DI snapshot cadence (once per chunk).")
+    p.add_argument("--vmin", type=float, default=-10.0, help="Minimum expected AI voltage (V).")
+    p.add_argument("--vmax", type=float, default=10.0, help="Maximum expected AI voltage (V).")
+    p.add_argument("--term", choices=["RSE","NRSE","DIFF"], default="RSE", help="AI terminal configuration.")
 
-    # Output / formatting
+    # Output / formatting (logging mode)
     p.add_argument("--outfile", default="",
-                   help="Output file path. If omitted, an auto-named file is created under .\\logs using the pattern "
-                        "ni_<device>_<YYYYmmdd_HHMMSS>.<csv|xlsx>. Existing files are never overwritten: "
-                        "a suffix _1, _2, ... is appended instead.")
+                   help="Output file path. If omitted, auto-named under .\\logs as ni_<device>_<YYYYmmdd_HHMMSS>.<csv|xlsx>. "
+                        "Existing files are never overwritten: a suffix _1, _2, ... is appended.")
     p.add_argument("--format", choices=["csv","xlsx"], default=None,
                    help="Output format. If omitted, inferred from --outfile extension, else CSV.")
-
-    # Run control / UI
-    p.add_argument("--duration", type=float, default=None,
-                   help="Seconds to run. Omit to run until Ctrl+C. When provided, progress defaults to a bar.")
+    p.add_argument("--duration", type=float, default=None, help="Seconds to run. Omit to run until Ctrl+C.")
     p.add_argument("--progress", choices=["auto","none","counter","bar"], default="auto",
                    help="Progress display mode. 'auto' = bar if --duration set, else counter.")
-    p.add_argument("--update-interval", type=float, default=0.5,
-                   help="Seconds between progress updates (counter or bar refresh).")
-    p.add_argument("--print-first", type=int, default=0,
-                   help="Print the first N logged rows to the console for a quick sanity check.")
+    p.add_argument("--update-interval", type=float, default=0.5, help="Seconds between progress updates.")
+    p.add_argument("--print-first", type=int, default=0, help="Print the first N logged rows to console.")
+    p.add_argument("--debug", action="store_true", help="Print extra debug info during setup and runtime.")
+
+    # Calibration mode
+    p.add_argument("--calibrate", action="store_true",
+                   help="Calibration mode: screen-only live readout (no file). Output prints at --rate (default 1 Hz).")
+    p.add_argument("--calib-window", type=float, default=5.0,
+                   help="Moving-average window in seconds for calibration display (set 0 to disable).")
+    p.add_argument("--calib-show-raw", action="store_true",
+                   help="Also print raw instantaneous values (in addition to the moving average).")
+    p.add_argument("--calib-sample-rate", type=float, default=100.0,
+                   help="Internal hardware sampling rate in calibration mode (Hz). Feeds moving average.")
+
+    # Ignition (logging mode only)
+    p.add_argument("--ignite", action="store_true",
+                   help="Enable ignition sequence (logging mode only): buzzer pre-warning, then relay pulse after logging stabilizes.")
+    p.add_argument("--buzzer-line", default=None,
+                   help="Digital OUTPUT line for buzzer (e.g. 'port1/line0'). Required with --ignite.")
+    p.add_argument("--igniter-line", default=None,
+                   help="Digital OUTPUT line for igniter relay (e.g. 'port1/line1'). Required with --ignite.")
+    p.add_argument("--arm-seconds", type=float, default=15.0,
+                   help="Seconds to sound buzzer before logging starts.")
+    p.add_argument("--stabilize-seconds", type=float, default=1.0,
+                   help="Seconds after logging starts before firing igniter.")
+    p.add_argument("--pulse-seconds", type=float, default=1.0,
+                   help="Duration of igniter relay ON time.")
 
     return p.parse_args()
 
-# ---------- Safe filename helper ----------
+# ---------- Filename helper ----------
 def safe_path(path: Path) -> Path:
-    """Ensure we don't overwrite an existing file by appending _1, _2, ..."""
     if not path.exists():
         return path
     stem, suffix, parent = path.stem, path.suffix, path.parent
@@ -207,9 +232,9 @@ def infer_output(args):
     out = safe_path(out)
     return fmt, out
 
-# ---------- Digital line parsing ----------
+# ---------- Digital line utilities ----------
 def expand_digital_spec(spec: str):
-    if not spec.strip():
+    if not spec or not spec.strip():
         return []
     parts = []
     for token in [t.strip() for t in spec.split(",") if t.strip()]:
@@ -217,7 +242,8 @@ def expand_digital_spec(spec: str):
             port, linerange = token.split("/line", 1)
             a, b = linerange.split(":")
             a, b = int(a), int(b)
-            if b < a: a, b = b, a
+            if b < a:
+                a, b = b, a
             for i in range(a, b+1):
                 parts.append(f"{port}/line{i}")
         else:
@@ -247,9 +273,95 @@ def progress_line_bar(elapsed, duration, width=30):
     remaining = max(duration - elapsed, 0.0)
     return f"[{bar}] {percent:3d}% | elapsed {elapsed:5.1f}s | ETA {remaining:5.1f}s"
 
-# ---------- Main ----------
+# ---------- Calibration ----------
+def run_calibration(args, ch_full, di_lines, ch_short):
+    print("Calibration mode: screen-only live readout (no file).")
+    rate_out = 1.0 if args.rate is None else float(args.rate)
+    rate_hw = float(args.calib_sample_rate)
+    window_samples = 1 if args.calib_window <= 0 else max(1, int(round(args.calib_window * rate_hw)))
+    print(f"Internal HW rate: {rate_hw:.3f} Hz | Output rate: {rate_out:.3f} Hz | MA window: {window_samples} sample(s) (~{args.calib_window:.2f}s)")
+
+    stop = False
+    def _sigint(_sig, _frame):
+        nonlocal stop
+        stop = True
+        print("\nStopping calibration…")
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    prev_handler = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, _sigint)
+
+    chunk = max(1, int(rate_hw * 0.2))
+    try:
+        with nidaqmx.Task() as ai_task:
+            for ch in ch_full:
+                ai_task.ai_channels.add_ai_voltage_chan(ch, min_val=args.vmin, max_val=args.vmax, terminal_config=TERM_MAP[args.term])
+            buf_samps = max(int(rate_hw * 3), chunk * 2)
+            ai_task.timing.cfg_samp_clk_timing(rate=rate_hw, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=buf_samps)
+            ai_task.control(TaskMode.TASK_VERIFY)
+
+            di_task = None
+            if di_lines:
+                di_task = nidaqmx.Task()
+                for ln in di_lines:
+                    di_task.di_channels.add_di_chan(f"{args.device}/{ln}", line_grouping=LineGrouping.CHAN_PER_LINE)
+                di_task.control(TaskMode.TASK_VERIFY)
+
+            ai_reader = AnalogMultiChannelReader(ai_task.in_stream)
+            ch_count = len(ch_full)
+            ai_buf = np.zeros((ch_count, chunk), dtype=np.float64)
+            hist = [deque(maxlen=window_samples) for _ in range(ch_count)]
+
+            hdr = ["time"] + [f"{name}_avg" for name in ch_short]
+            if args.calib_show_raw: hdr += [f"{name}_raw" for name in ch_short]
+            hdr += [("di_" + ln.replace("/", "_")).replace(":", "_") for ln in di_lines]
+            print(" | ".join(hdr))
+
+            ai_task.start()
+            if di_task: di_task.start()
+
+            next_print = time.time()
+            try:
+                while not stop:
+                    ai_reader.read_many_sample(ai_buf, number_of_samples_per_channel=chunk, timeout=max(2.0, chunk / rate_hw * 2))
+                    for j in range(chunk):
+                        for i in range(ch_count): hist[i].append(ai_buf[i, j])
+
+                    now = time.time()
+                    if now >= next_print:
+                        avgs = [sum(h) / len(h) if len(h) > 0 else 0.0 for h in hist]
+                        ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now))
+                        if di_task:
+                            di_vals = di_task.read()
+                            di_vals = [1 if bool(v) else 0 for v in di_vals]
+                        else:
+                            di_vals = []
+                        parts = [ts_iso] + [f"{v:.6f}" for v in avgs]
+                        if args.calib_show_raw:
+                            raw_vals = ai_buf[:, -1].tolist()
+                            parts += [f"{v:.6f}" for v in raw_vals]
+                        parts += [str(d) for d in di_vals]
+                        print(" | ".join(parts))
+                        next_print = now + (1.0 / max(rate_out, 1e-6))
+            except KeyboardInterrupt:
+                print("\nStopping calibration…")
+            finally:
+                try: ai_task.stop()
+                except: pass
+                if di_task:
+                    try: di_task.stop()
+                    except: pass
+                    di_task.close()
+    finally:
+        signal.signal(signal.SIGINT, prev_handler)
+
+# ---------- Main (logging + ignition) ----------
 def main():
     args = parse_args()
+
+    # Defaults by mode
+    if args.rate is None:
+        args.rate = 1.0 if args.calibrate else 1000.0
+
     ch_short = [c.strip() for c in args.channels.split(",") if c.strip()]
     if not ch_short:
         print("At least one analog input channel is required.")
@@ -260,6 +372,49 @@ def main():
     di_lines = expand_digital_spec(args.digital)
     di_headers = [("di_" + ln.replace("/", "_")).replace(":", "_") for ln in di_lines]
 
+    # Safety checks
+    if args.calibrate and args.ignite:
+        print("Error: --ignite cannot be used together with --calibrate.")
+        sys.exit(2)
+    if args.ignite and (not args.buzzer_line or not args.igniter_line):
+        print("Error: --ignite requires both --buzzer-line and --igniter-line.")
+        sys.exit(2)
+
+    # Create DO task immediately (safe state FIRST) when ignition is requested
+    do_task = None
+    if args.ignite:
+        try:
+            do_task = nidaqmx.Task()
+            # Fixed order [buzzer, igniter] for atomic writes
+            do_task.do_channels.add_do_chan(f"{args.device}/{args.buzzer_line}", line_grouping=LineGrouping.CHAN_PER_LINE)
+            do_task.do_channels.add_do_chan(f"{args.device}/{args.igniter_line}", line_grouping=LineGrouping.CHAN_PER_LINE)
+            # SAFETY: force both LOW immediately at start
+            do_task.write([False, False], auto_start=True)
+            do_task.control(TaskMode.TASK_VERIFY)
+            print("Safety: DO lines set LOW at start (buzzer=LOW, igniter=LOW).")
+        except Exception as e:
+            print(f"Error preparing ignition DO task: {e}")
+            if do_task:
+                try: do_task.close()
+                except: pass
+            sys.exit(3)
+
+    # Calibration mode (no file I/O)
+    if args.calibrate:
+        print("Starting logger… (calibration mode setup)")
+        print(f"AI channels: {', '.join(ch_full)} | term={args.term} | range=[{args.vmin},{args.vmax}] V")
+        if di_lines:
+            print(f"DI lines: {', '.join(di_lines)}")
+        run_calibration(args, ch_full, di_lines, ch_short)
+        # Ensure DO lines are LOW on exit (already LOW), then close task
+        if do_task:
+            try: do_task.write([False, False], auto_start=True)
+            except: pass
+            try: do_task.close()
+            except: pass
+        return
+
+    # ---- Normal logging mode below ----
     fmt, out = infer_output(args)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -277,36 +432,65 @@ def main():
     if args.print_first > 0:
         print(f"Will print the first {args.print_first} rows below as they are logged.")
 
-    stop = False
-    def _sigint(_sig, _frame):
-        nonlocal stop
-        stop = True
-        sys.stdout.write("\nStopping... (closing output)\n")
-        sys.stdout.flush()
-    signal.signal(signal.SIGINT, _sigint)
-
-    writer = CSVWriter(out) if fmt == "csv" else XLSXWriter(out, sheet_name="DAQ")
-    samples_total = 0
-    next_status_time = 0.0
-    last_ts = time.time()
-    last_samples = 0
-
-    remaining_print = max(0, int(args.print_first))
-
     try:
+        # Arming phase if ignition enabled
+        if do_task:
+            print(f"ARMING: Sounding buzzer for {args.arm_seconds:.1f} s. Press Ctrl+C to abort.")
+            stop_arm = False
+            def _arm_sigint(_s, _f):
+                nonlocal stop_arm
+                stop_arm = True
+                print("\nAborting arming…")
+            prev = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, _arm_sigint)
+
+            try:
+                do_task.write([True, False], auto_start=True)  # buzzer ON
+                t_end = time.time() + args.arm_seconds
+                while time.time() < t_end and not stop_arm:
+                    remaining = max(0.0, t_end - time.time())
+                    sys.stdout.write(f"\rArming… {remaining:5.1f}s remaining   ")
+                    sys.stdout.flush()
+                    time.sleep(0.1)
+            finally:
+                # Always silence buzzer
+                do_task.write([False, False], auto_start=True)
+                sys.stdout.write("\rArming… done.                      \n")
+                sys.stdout.flush()
+                signal.signal(signal.SIGINT, prev)
+
+            if stop_arm:
+                print("Arming aborted by user. Exiting.")
+                if do_task:
+                    try: do_task.write([False, False], auto_start=True)
+                    except: pass
+                    try: do_task.close()
+                    except: pass
+                return
+
+        # Ctrl+C during logging
+        stop = False
+        def _sigint(_sig, _frame):
+            nonlocal stop
+            stop = True
+            sys.stdout.write("\nStopping... (closing output)\n")
+            sys.stdout.flush()
+        signal.signal(signal.SIGINT, _sigint)
+
+        # Create writer & tasks
+        writer = CSVWriter(out) if fmt == "csv" else XLSXWriter(out, sheet_name="DAQ")
+        samples_total = 0
+        next_status_time = 0.0
+        last_ts = time.time()
+        last_samples = 0
+        remaining_print = max(0, int(args.print_first))
+
         print("Creating AI task…")
         with nidaqmx.Task() as ai_task:
             for ch in ch_full:
-                ai_task.ai_channels.add_ai_voltage_chan(
-                    ch, min_val=args.vmin, max_val=args.vmax,
-                    terminal_config=TERM_MAP[args.term]
-                )
+                ai_task.ai_channels.add_ai_voltage_chan(ch, min_val=args.vmin, max_val=args.vmax, terminal_config=TERM_MAP[args.term])
             buf_samps = int(max(args.rate * 10, args.chunk * 2))
-            ai_task.timing.cfg_samp_clk_timing(
-                rate=args.rate,
-                sample_mode=AcquisitionType.CONTINUOUS,
-                samps_per_chan=buf_samps
-            )
+            ai_task.timing.cfg_samp_clk_timing(rate=args.rate, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=buf_samps)
             print("Verifying AI task…")
             ai_task.control(TaskMode.TASK_VERIFY)
 
@@ -315,10 +499,7 @@ def main():
                 print("Creating DI task…")
                 di_task = nidaqmx.Task()
                 for ln in di_lines:
-                    di_task.di_channels.add_di_chan(
-                        f"{args.device}/{ln}",
-                        line_grouping=LineGrouping.CHAN_PER_LINE
-                    )
+                    di_task.di_channels.add_di_chan(f"{args.device}/{ln}", line_grouping=LineGrouping.CHAN_PER_LINE)
                 print("Verifying DI task…")
                 di_task.control(TaskMode.TASK_VERIFY)
 
@@ -330,11 +511,10 @@ def main():
 
             print("Starting tasks…")
             ai_task.start()
-            if di_task:
-                di_task.start()
+            if di_task: di_task.start()
             print("Running. Press Ctrl+C to stop.")
 
-            # Preview banner/header AFTER start messages so nothing splits them from rows
+            # Preview header AFTER start messages
             if remaining_print > 0:
                 print("(…start of preview…)")
                 hdr = ["timestamp_iso", "idx"] + ch_short + di_headers
@@ -345,13 +525,37 @@ def main():
             last_ts = t0
             next_status_time = t0 + args.update_interval
 
+            # Ignition timing flags (after logging started)
+            fired = False
+            fire_at = (t0 + args.stabilize_seconds) if do_task else None
+            fire_until = None
+
             while not stop:
                 now = time.time()
                 if args.duration and (now - t0) >= args.duration:
                     break
 
+                # Handle ignition timing
+                if do_task and (not fired) and now >= fire_at:
+                    try:
+                        do_task.write([False, True], auto_start=True)  # igniter ON
+                        print(f"\nIGNITION: Relay ON for {args.pulse_seconds:.3f}s")
+                    except Exception as e:
+                        print(f"\nIGNITION ERROR: {e}")
+                    fire_until = now + args.pulse_seconds
+                    fired = True
+
+                if do_task and fired and fire_until and now >= fire_until:
+                    try:
+                        do_task.write([False, False], auto_start=True)
+                        print("IGNITION: Relay OFF")
+                    except: pass
+                    fire_until = None
+
+                # Read AI chunk
                 ai_reader.read_many_sample(ai_buf, number_of_samples_per_channel=args.chunk, timeout=10.0)
 
+                # DI snapshot once per chunk
                 if di_task:
                     di_vals = di_task.read()
                     di_vals = [1 if bool(v) else 0 for v in di_vals]
@@ -377,6 +581,7 @@ def main():
 
                 samples_total += args.chunk
 
+                # Periodic flush for CSV
                 if isinstance(writer, CSVWriter) and (samples_total % max(int(args.rate*5), 1) < args.chunk):
                     writer.flush()
 
@@ -384,10 +589,7 @@ def main():
                     elapsed = now - t0
                     dt = now - last_ts if (now - last_ts) > 0 else 1e-9
                     inst_rate = (samples_total - last_samples) / dt
-                    if mode == "bar" and args.duration:
-                        line = progress_line_bar(elapsed, args.duration)
-                    else:
-                        line = progress_line_counter(samples_total, ch_count, elapsed, inst_rate)
+                    line = progress_line_bar(elapsed, args.duration) if (mode == "bar" and args.duration) else progress_line_counter(samples_total, ch_count, elapsed, inst_rate)
                     sys.stdout.write("\r" + line + " " * 10)
                     sys.stdout.flush()
                     last_ts = now
@@ -404,14 +606,23 @@ def main():
                 di_task.stop()
                 di_task.close()
 
-    finally:
         print("Closing output…")
         writer.close()
         print(f"Done. Wrote ~{samples_total} samples per AI channel to {out}")
 
+    finally:
+        # Always force DO lines LOW and close on exit
+        if do_task:
+            try:
+                do_task.write([False, False], auto_start=True)
+            except: pass
+            try:
+                do_task.close()
+            except: pass
+
 # ---------- CLI wrapper ----------
 def run():
-    """Entry-point wrapper so packaging can expose a `ni-logger` command."""
+    """Entry-point wrapper so packaging can expose a `ni_usb6009_logger` command."""
     main()
 
 if __name__ == "__main__":

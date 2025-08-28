@@ -1,40 +1,16 @@
 Metadata-Version: 2.4
-Name: ni-usb6009-logger
-Version: 1.0.0
-Summary: NI USB-6009 data logger for AI + DI with CSV/XLSX output, progress, and preview.
-Author-email: David Steeman <david@steeman.be>
+Name: ni_usb6009_logger
+Version: 1.1.0
+Summary: NI USB-6009 data logger for AI + DI with CSV/XLSX output, calibration moving average, and ignition sequence.
+Author: David Steeman
 License: MIT
-Keywords: NI-DAQmx,USB-6009,data acquisition,logger,DAQ
-Classifier: Programming Language :: Python :: 3
-Classifier: License :: OSI Approved :: MIT License
-Classifier: Operating System :: Microsoft :: Windows
-Classifier: Topic :: Scientific/Engineering
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
+License-File: LICENSE
 Requires-Dist: nidaqmx
 Requires-Dist: numpy
 Provides-Extra: excel
 Requires-Dist: openpyxl; extra == "excel"
+Dynamic: license-file
 
-# NI USB-6009 Logger (AI + DI)
-
-CLI to log NI USB-6009 analog inputs and optional digital inputs to CSV/XLSX with progress and preview.
-
-## Features
-- AI (hardware-timed) + DI (static snapshot per AI chunk)
-- CSV or XLSX
-- Progress counter/bar, `--print-first N` preview
-- Safe filenames (no overwrite)
-- Works on Windows with NI-DAQmx
-
-## Install
-
-```powershell
-# Create venv (optional)
-python -m venv .venv
-.\.venv\Scripts\activate
-
-# From source
-pip install -e .
-# Excel support:
-pip install -e .[excel]
+# README placeholder - full README.md content from earlier answer.

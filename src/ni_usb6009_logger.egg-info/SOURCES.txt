@@ -1,3 +1,4 @@
+LICENSE
 README.md
 pyproject.toml
 src/ni_usb6009_logger/__init__.py

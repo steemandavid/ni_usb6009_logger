@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ni_usb6009_logger"                      # package name on pip (matches import)
-version = "1.0.0"
-description = "NI USB-6009 data logger for AI + DI with CSV/XLSX output, progress and preview."
+name = "ni_usb6009_logger"
+version = "1.1.0"
+description = "NI USB-6009 data logger for AI + DI with CSV/XLSX output, calibration moving average, and ignition sequence."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -16,7 +16,7 @@ dependencies = ["nidaqmx", "numpy"]
 excel = ["openpyxl"]
 
 [project.scripts]
-ni_usb6009_logger = "ni_usb6009_logger.cli:run"  # CLI command == package name
+ni_usb6009_logger = "ni_usb6009_logger.cli:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,0 +1,1 @@
+# Changelog placeholder - full content from earlier answer.

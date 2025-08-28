@@ -1,2 +1,2 @@
 [console_scripts]
-ni-logger = ni_usb6009_logger.cli:run
+ni_usb6009_logger = ni_usb6009_logger.cli:run
