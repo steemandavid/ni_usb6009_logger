@@ -1,1 +1,199 @@
-# README placeholder - full README.md content from earlier answer.
+# NI USB-6009 Data Logger (Python)
+
+Data logger for the NI USB-6009, written in Python using `nidaqmx`.  
+Supports:
+
+- Logging **analog inputs (AI)** and optional **digital inputs (DI)** to CSV or Excel (`.xlsx`).
+- Live **progress counter / bar** while logging.
+- **Safe filenames** (no overwrite; auto suffix).
+- **Calibration mode**: screen-only output with moving average filtering.
+- **Ignition mode**: buzzer pre-warning, relay pulse, with **current-sense failsafe** using a shunt resistor.
+
+Tested on **Windows 10/11**, **Python 3.10/3.11**, with **NI-DAQmx runtime** installed.
+
+---
+
+## Installation
+
+### Requirements
+- NI-DAQmx driver/runtime from NI ([download](https://www.ni.com)).
+- Python 3.10+ and `pip`.
+
+### Python dependencies
+Install into a virtual environment:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+
+pip install nidaqmx numpy
+pip install openpyxl   # required only for Excel output
+```
+
+### Local install (register CLI command)
+From the project root (where `pyproject.toml` lives):
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -e .[excel]
+```
+
+This registers the command:
+
+```powershell
+ni_usb6009_logger --help
+```
+
+so you can call it directly without prefixing `python`.
+
+### Using the venv
+
+```powershell
+cd "(path)\Test stand 2 (NI USB-6009)\ni-usb-6009-daq\ni_usb6009_logger"
+.\.venv\Scripts\activate.bat
+ni_usb6009_logger --help
+```
+
+When finished, deactivate the venv:
+
+```powershell
+deactivate
+```
+
+
+---
+
+## Usage examples
+
+### 1. Basic logging (AI only, CSV, auto-named file)
+```powershell
+ni_usb6009_logger --device Dev1 --channels ai0 --rate 1000 --term RSE --print-first 10
+```
+
+### 2. AI + DI logging (two AI, 4 DI lines on port0), custom CSV
+```powershell
+ni_usb6009_logger --device Dev1 --channels ai0,ai1 --digital port0/line0:3 ^
+  --rate 100 --term RSE --outfile .\logs\run.csv --print-first 10
+```
+
+### 3. Log to Excel (`.xlsx`)
+```powershell
+ni_usb6009_logger --device Dev1 --channels ai0,ai1 --digital port0/line0:7 ^
+  --rate 500 --term RSE --outfile .\logs\run.xlsx --print-first 10
+```
+
+### 4. Timed run (auto-stop after 30s)
+```powershell
+ni_usb6009_logger --device Dev1 --channels ai0 --rate 1000 --duration 30 --print-first 10
+```
+
+### 5. Differential wiring example
+```powershell
+ni_usb6009_logger --device Dev1 --channels ai0,ai1 --rate 1000 --term DIFF --print-first 10
+```
+
+### 6. Show live counter or progress bar
+- Counter (default when no `--duration`):
+```powershell
+ni_usb6009_logger --device Dev1 --channels ai0 --rate 1000 --term RSE --progress counter --print-first 10
+```
+
+- Progress bar (useful with duration):
+```powershell
+ni_usb6009_logger --device Dev1 --channels ai0 --rate 1000 --term RSE --duration 30 --progress bar --print-first 10
+```
+
+### 7. Calibration mode (screen only, moving average)
+```powershell
+ni_usb6009_logger --device Dev1 --channels ai0,ai1 --calibrate --calib-window 5 ^
+  --calib-sample-rate 100 --rate 1
+  
+ni_usb6009_logger --device Dev1 --channels ai0,ai1,ai2,ai3,ai4,ai5,ai6 --calibrate --calib-window 5 --calib-sample-rate 100 --rate 1 --term RSE
+
+```
+
+### 8. Ignition with buzzer + relay
+```powershell
+ni_usb6009_logger --device Dev1 --channels ai0 --digital port0/line0:7 --rate 1000 --term RSE ^
+  --ignite --buzzer-line port1/line0 --igniter-line port1/line1 ^
+  --arm-seconds 15 --stabilize-seconds 1 --pulse-seconds 1
+```
+
+### 9. Ignition with current-sense failsafe (shunt in RSE mode)
+```powershell
+ni_usb6009_logger --device Dev1 --channels ai0 --rate 1000 --term RSE ^
+  --ignite --buzzer-line port1/line0 --igniter-line port1/line1 ^
+  --igniter-sense-ai ai2 --sense-term RSE --shunt-ohms 1.0 ^
+  --continuity-min-ma 0.2 --leak-max-ma 5 --fire-confirm-ma 300
+```
+
+### 10. My current test command
+```powershell
+ni_usb6009_logger --device Dev1 --channels ai0,ai1,ai2,ai3,ai4,ai5,ai6 --calibrate --calib-window 5 --calib-sample-rate 100 --rate 1 --term RSE --ignite --buzzer-line port1/line1 --igniter-line port1/line0 --igniter-sense-ai ai2 --sense-term RSE --shunt-ohms 1.0 --continuity-min-ma 0.2 --leak-max-ma 5 --fire-confirm-ma 300
+```
+
+
+---
+## Errors
+
+```
+nidaqmx.errors.DaqError: Internal Software Error occurred in MIG software. Please contact National Instruments Support.
+```
+
+Check if the correct NI services are running:
+
+```powershell
+Get-Service *NI* | Sort-Object Status, Name
+Start-Service -Name "nidevldu","mxssvr","nimDNSResponder"  # as admin
+```
+
+Try restarting the _NI Configuration Manager_ service in Windows Control Panel, Administrative Tools, Services.
+
+https://knowledge.ni.com/KnowledgeArticleDetails?id=kA00Z000000PAp0SAG
+
+
+## Digital input notes (USB-6009)
+- Digital inputs are **static** (not hardware-timed).  
+- This script snapshots DI once per analog chunk and repeats the snapshot for each row in that chunk.  
+- To increase the effective DI sampling frequency, lower `--chunk`.
+
+---
+
+## Ignition current-sense wiring (RSE mode)
+
+### Components
+- **Relay**: coil driven via DO + driver transistor (ULN2803, MOSFET). Contacts in series with igniter.  
+- **Shunt resistor**: 1.0 Ω, ≥2 W, low inductance. Placed between igniter and ignition supply ground.  
+- **Continuity bias resistor**: 47 kΩ (from +V to igniter/shunt node). Allows ~0.25 mA test current at 12 V.  
+
+### Wiring
+- **Ignition +V** → **Relay contact (NO)** → **Igniter +**  
+- **Igniter –** → **1 Ω shunt** → **Ignition GND**  
+- **Bias resistor 47 kΩ**: Ignition +V → igniter/shunt junction  
+- **AI+ (e.g. Dev1/ai2)** → igniter/shunt junction  
+- **AI GND** → ignition supply GND  
+
+### Operation
+- **Relay open**: only bias current flows (~0.25 mA @ 12 V → 0.25 mV across shunt). Used for continuity check.  
+- **Relay closed**: full ignition current flows (3–6 A typical, → 3–6 V across shunt). Used for fire confirm.  
+- **Software thresholds**:  
+  - `--continuity-min-ma`: require ≥0.2 mA for continuity before arming.  
+  - `--leak-max-ma`: inhibit if ≥5 mA before firing.  
+  - `--fire-confirm-ma`: confirm if ≥300 mA during pulse.
+
+---
+
+## Safety notes
+- The USB-6009 **must never carry igniter current**. It only measures across the shunt.  
+- Always drive relay coils with a **transistor or ULN2803**.  
+- Add a **flyback diode** across the relay coil.  
+- Fuse the ignition supply appropriately.  
+- For maximum safety, keep ignition wiring and DAQ physically separated, or use **isolation** (opto or INA current-sense amplifier).  
+- Always perform dry-runs with dummy loads before connecting real igniters.
+
+---
+
+## License
+MIT (see [LICENSE](LICENSE))  
+© 2025 David Steeman

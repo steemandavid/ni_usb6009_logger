@@ -183,9 +183,9 @@ def parse_args():
     p.add_argument("--ignite", action="store_true",
                    help="Enable ignition sequence (logging mode only): buzzer pre-warning, then relay pulse after logging stabilizes.")
     p.add_argument("--buzzer-line", default=None,
-                   help="Digital OUTPUT line for buzzer (e.g. 'port1/line0'). Required with --ignite.")
+                   help="Digital OUTPUT line for buzzer (e.g. 'port0/line1'). Required with --ignite.")
     p.add_argument("--igniter-line", default=None,
-                   help="Digital OUTPUT line for igniter relay (e.g. 'port1/line1'). Required with --ignite.")
+                   help="Digital OUTPUT line for igniter relay (e.g. 'port0/line0'). Required with --ignite.")
     p.add_argument("--arm-seconds", type=float, default=15.0,
                    help="Seconds to sound buzzer before logging starts.")
     p.add_argument("--stabilize-seconds", type=float, default=1.0,
@@ -193,9 +193,25 @@ def parse_args():
     p.add_argument("--pulse-seconds", type=float, default=1.0,
                    help="Duration of igniter relay ON time.")
 
+    # Current-sense & safety
+    p.add_argument("--igniter-sense-ai", default=None,
+                   help="AI channel used to measure shunt voltage for igniter current (e.g. 'ai2').")
+    p.add_argument("--shunt-ohms", type=float, default=1.0,
+                   help="Series shunt resistance in ohms.")
+    p.add_argument("--continuity-min-ma", type=float, default=0.2,
+                   help="Minimum current (mA) that indicates igniter continuity present (pre-arm check).")
+    p.add_argument("--leak-max-ma", type=float, default=5.0,
+                   help="Maximum allowed current (mA) BEFORE ignition; above this inhibits arming/firing.")
+    p.add_argument("--fire-confirm-ma", type=float, default=300.0,
+                   help="Minimum current (mA) that should be observed DURING pulse to confirm ignition.")
+    p.add_argument("--sense-rate", type=float, default=100.0,
+                   help="Sampling rate (Hz) for current-sense AI during arming/pulse confirm.")
+    p.add_argument("--sense-term", choices=["RSE","NRSE","DIFF"], default="DIFF",
+                   help="Terminal configuration for the igniter sense AI channel.")
+
     return p.parse_args()
 
-# ---------- Filename helper ----------
+# ---------- Filename & helpers ----------
 def safe_path(path: Path) -> Path:
     if not path.exists():
         return path
@@ -232,7 +248,6 @@ def infer_output(args):
     out = safe_path(out)
     return fmt, out
 
-# ---------- Digital line utilities ----------
 def expand_digital_spec(spec: str):
     if not spec or not spec.strip():
         return []
@@ -254,7 +269,6 @@ def expand_digital_spec(spec: str):
             uniq.append(p); seen.add(p)
     return uniq
 
-# ---------- Progress helpers ----------
 def format_rate(samples_per_sec):
     if samples_per_sec >= 1e6: return f"{samples_per_sec/1e6:.2f} MS/s"
     if samples_per_sec >= 1e3: return f"{samples_per_sec/1e3:.2f} kS/s"
@@ -272,6 +286,9 @@ def progress_line_bar(elapsed, duration, width=30):
     percent = int(frac * 100)
     remaining = max(duration - elapsed, 0.0)
     return f"[{bar}] {percent:3d}% | elapsed {elapsed:5.1f}s | ETA {remaining:5.1f}s"
+
+def compute_current_ma(v_shunt, r_ohms):
+    return (v_shunt / max(r_ohms, 1e-9)) * 1000.0
 
 # ---------- Calibration ----------
 def run_calibration(args, ch_full, di_lines, ch_short):
@@ -293,8 +310,11 @@ def run_calibration(args, ch_full, di_lines, ch_short):
     chunk = max(1, int(rate_hw * 0.2))
     try:
         with nidaqmx.Task() as ai_task:
-            for ch in ch_full:
-                ai_task.ai_channels.add_ai_voltage_chan(ch, min_val=args.vmin, max_val=args.vmax, terminal_config=TERM_MAP[args.term])
+            # Multi-channel add in ONE call to avoid MIG error
+            phys = ",".join(ch_full)
+            ai_task.ai_channels.add_ai_voltage_chan(
+                phys, min_val=args.vmin, max_val=args.vmax, terminal_config=TERM_MAP[args.term]
+            )
             buf_samps = max(int(rate_hw * 3), chunk * 2)
             ai_task.timing.cfg_samp_clk_timing(rate=rate_hw, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=buf_samps)
             ai_task.control(TaskMode.TASK_VERIFY)
@@ -380,18 +400,20 @@ def main():
         print("Error: --ignite requires both --buzzer-line and --igniter-line.")
         sys.exit(2)
 
+    # Build sense channel path
+    sense_chan_full = f"{args.device}/{args.igniter_sense_ai.strip()}" if args.igniter_sense_ai else None
+
     # Create DO task immediately (safe state FIRST) when ignition is requested
     do_task = None
     if args.ignite:
         try:
             do_task = nidaqmx.Task()
-            # Fixed order [buzzer, igniter] for atomic writes
             do_task.do_channels.add_do_chan(f"{args.device}/{args.buzzer_line}", line_grouping=LineGrouping.CHAN_PER_LINE)
             do_task.do_channels.add_do_chan(f"{args.device}/{args.igniter_line}", line_grouping=LineGrouping.CHAN_PER_LINE)
             # SAFETY: force both LOW immediately at start
             do_task.write([False, False], auto_start=True)
             do_task.control(TaskMode.TASK_VERIFY)
-            print("Safety: DO lines set LOW at start (buzzer=LOW, igniter=LOW).")
+            print(f"Safety: DO lines set LOW at start (buzzer={args.buzzer_line} LOW, igniter={args.igniter_line} LOW).")
         except Exception as e:
             print(f"Error preparing ignition DO task: {e}")
             if do_task:
@@ -406,7 +428,7 @@ def main():
         if di_lines:
             print(f"DI lines: {', '.join(di_lines)}")
         run_calibration(args, ch_full, di_lines, ch_short)
-        # Ensure DO lines are LOW on exit (already LOW), then close task
+        # Ensure DO lines LOW & close task on exit
         if do_task:
             try: do_task.write([False, False], auto_start=True)
             except: pass
@@ -433,7 +455,7 @@ def main():
         print(f"Will print the first {args.print_first} rows below as they are logged.")
 
     try:
-        # Arming phase if ignition enabled
+        # Arming phase if ignition enabled (with current-sense)
         if do_task:
             print(f"ARMING: Sounding buzzer for {args.arm_seconds:.1f} s. Press Ctrl+C to abort.")
             stop_arm = False
@@ -444,29 +466,69 @@ def main():
             prev = signal.getsignal(signal.SIGINT)
             signal.signal(signal.SIGINT, _arm_sigint)
 
+            sense_task = None
+            reader = None
+            buf = np.zeros((1, 1), dtype=np.float64)
             try:
+                if sense_chan_full:
+                    sense_task = nidaqmx.Task()
+                    sense_task.ai_channels.add_ai_voltage_chan(
+                        sense_chan_full,
+                        min_val=-1.0, max_val=1.0,
+                        terminal_config=TERM_MAP[args.sense_term]
+                    )
+                    sense_task.timing.cfg_samp_clk_timing(
+                        rate=args.sense_rate, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=10
+                    )
+                    sense_task.control(TaskMode.TASK_VERIFY)
+                    reader = AnalogMultiChannelReader(sense_task.in_stream)
+                    sense_task.start()
+
                 do_task.write([True, False], auto_start=True)  # buzzer ON
                 t_end = time.time() + args.arm_seconds
+                print(f"Continuity min = {args.continuity_min_ma:.2f} mA | Leak max = {args.leak_max_ma:.2f} mA")
+                continuity_ok = False
+
                 while time.time() < t_end and not stop_arm:
-                    remaining = max(0.0, t_end - time.time())
-                    sys.stdout.write(f"\rArming… {remaining:5.1f}s remaining   ")
-                    sys.stdout.flush()
-                    time.sleep(0.1)
-            finally:
-                # Always silence buzzer
+                    i_ma = None
+                    if reader:
+                        reader.read_many_sample(buf, number_of_samples_per_channel=1, timeout=0.1)
+                        v = float(buf[0, 0])
+                        i_ma = compute_current_ma(v, args.shunt_ohms)
+                        sys.stdout.write(f"\rArming… {max(0.0, t_end-time.time()):5.1f}s | I={i_ma:7.2f} mA   ")
+                        sys.stdout.flush()
+                        if i_ma >= args.leak_max_ma:
+                            print("\nSafety INHIBIT: leak current detected above limit before firing.")
+                            raise RuntimeError("Leak current inhibit")
+                        if i_ma >= args.continuity_min_ma:
+                            continuity_ok = True
+                    else:
+                        sys.stdout.write(f"\rArming… {max(0.0, t_end-time.time()):5.1f}s   ")
+                        sys.stdout.flush()
+                    time.sleep(1.0 / max(args.sense_rate, 10.0))
+
+                if stop_arm:
+                    print("\nArming aborted by user. Exiting.")
+                    return
+
+                if reader and not continuity_ok:
+                    print("\nSafety INHIBIT: igniter continuity not detected (below threshold).")
+                    return
+
+            except RuntimeError:
                 do_task.write([False, False], auto_start=True)
+                print("Buzzer OFF. Ignition inhibited.")
+                return
+            finally:
+                try: do_task.write([False, False], auto_start=True)
+                except: pass
                 sys.stdout.write("\rArming… done.                      \n")
                 sys.stdout.flush()
                 signal.signal(signal.SIGINT, prev)
-
-            if stop_arm:
-                print("Arming aborted by user. Exiting.")
-                if do_task:
-                    try: do_task.write([False, False], auto_start=True)
+                if sense_task:
+                    try: sense_task.stop()
                     except: pass
-                    try: do_task.close()
-                    except: pass
-                return
+                    sense_task.close()
 
         # Ctrl+C during logging
         stop = False
@@ -487,8 +549,11 @@ def main():
 
         print("Creating AI task…")
         with nidaqmx.Task() as ai_task:
-            for ch in ch_full:
-                ai_task.ai_channels.add_ai_voltage_chan(ch, min_val=args.vmin, max_val=args.vmax, terminal_config=TERM_MAP[args.term])
+            # Multi-channel add in ONE call to avoid MIG error
+            phys = ",".join(ch_full)
+            ai_task.ai_channels.add_ai_voltage_chan(
+                phys, min_val=args.vmin, max_val=args.vmax, terminal_config=TERM_MAP[args.term]
+            )
             buf_samps = int(max(args.rate * 10, args.chunk * 2))
             ai_task.timing.cfg_samp_clk_timing(rate=args.rate, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=buf_samps)
             print("Verifying AI task…")
@@ -525,7 +590,7 @@ def main():
             last_ts = t0
             next_status_time = t0 + args.update_interval
 
-            # Ignition timing flags (after logging started)
+            # Ignition timing (after logging starts)
             fired = False
             fire_at = (t0 + args.stabilize_seconds) if do_task else None
             fire_until = None
@@ -540,6 +605,19 @@ def main():
                     try:
                         do_task.write([False, True], auto_start=True)  # igniter ON
                         print(f"\nIGNITION: Relay ON for {args.pulse_seconds:.3f}s")
+                        if sense_chan_full:
+                            with nidaqmx.Task() as confirm_task:
+                                confirm_task.ai_channels.add_ai_voltage_chan(
+                                    sense_chan_full, min_val=-1.0, max_val=1.0,
+                                    terminal_config=TERM_MAP[args.sense_term]
+                                )
+                                time.sleep(0.02)
+                                v_now = confirm_task.read(number_of_samples_per_channel=1, timeout=0.2)
+                                v_now = float(v_now)
+                                i_now_ma = compute_current_ma(v_now, args.shunt_ohms)
+                                print(f"IGNITION confirm sample: {i_now_ma:.1f} mA")
+                                if i_now_ma < args.fire_confirm_ma:
+                                    print("WARNING: Ignition current below confirm threshold – check wiring/supply/igniter.")
                     except Exception as e:
                         print(f"\nIGNITION ERROR: {e}")
                     fire_until = now + args.pulse_seconds
