@@ -3,6 +3,7 @@
 Covers: start gating, a full logging run with recovery, and a mid-run device
 unplug (friendly error + partial data still on disk).
 """
+import sys
 import time
 
 import pytest
@@ -19,7 +20,18 @@ def qapp(monkeypatch, tmp_path_factory):
     QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(settings_dir))
     QSettings.setDefaultFormat(QSettings.IniFormat)
     app = QApplication.instance() or QApplication([])
+    # Qt does not propagate an exception raised inside a slot into the caller:
+    # it routes it to sys.excepthook. A crash that closes the real app (via
+    # gui.app._excepthook) therefore left a PASSING test behind -- which is
+    # exactly how CalibrationSession.run() returning None instead of a
+    # SessionResult reached a user. Record them and fail the test.
+    unhandled = []
+    monkeypatch.setattr(sys, "excepthook",
+                        lambda et, e, tb: unhandled.append((et, e)))
     yield app
+    assert not unhandled, (
+        "unhandled exception in a Qt slot (the real app would have closed): "
+        f"{unhandled[0][0].__name__}: {unhandled[0][1]}")
 
 
 def _make_window(qapp, fake_daq, tmp_path):
@@ -152,6 +164,9 @@ def test_gui_calibration_feeds_readout_and_plot(qapp, fake_daq, tmp_path):
     assert win.calib_readout.text() not in ("—", ""), "readout shows averages"
     win._stop_session()
     _wait_worker_done(qapp, win)
+    # Stopping calibration must complete like any other session: the worker
+    # emits run()'s return value into _on_finished, so returning None here
+    # crashed the app with AttributeError on result.output_path.
     assert win.calib_plot._curves, "calibration plot configured"
     for ring in win.calib_plot._rings:
         t, v = ring.snapshot()

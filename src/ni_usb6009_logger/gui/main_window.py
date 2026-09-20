@@ -581,6 +581,12 @@ class MainWindow(QMainWindow):
                 "\n\nAny data recorded so far is safe in the output and recovery files.")
 
     def _on_finished(self, result):
+        if result is None:
+            # A session that returns nothing is a bug in that session, but it
+            # must not reach _excepthook and close the app on the user.
+            self.statusBar().showMessage("Finished")
+            self._refresh_recovery()
+            return
         lines = []
         if result.output_path:
             lines.append(f"Saved: {result.output_path}")

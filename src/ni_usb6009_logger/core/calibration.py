@@ -15,6 +15,7 @@ from ni_usb6009_logger.core.events import (
     CalibRow,
     Reporter,
     SampleBlock,
+    SessionResult,
     SessionState,
 )
 
@@ -33,7 +34,7 @@ class CalibrationSession:
         self.cfg = cfg
         self.rep = reporter
 
-    def run(self, stop=None, fire_permission=None) -> None:
+    def run(self, stop=None, fire_permission=None) -> SessionResult:
         # fire_permission is ignition-only; accepted for worker uniformity.
         import threading
         if stop is None:
@@ -132,3 +133,9 @@ class CalibrationSession:
                     rep.on_calib_row(CalibRow(ts_iso, avgs, raw_vals, di_vals))
                     next_print = now + (1.0 / max(rate_out, 1e-6))
         rep.on_state(SessionState.DONE)
+        # Must match LoggingSession.run(): the GUI worker emits whatever run()
+        # returns straight into MainWindow._on_finished, which reads
+        # result.output_path. Returning None crashed the app every time a
+        # calibration run was stopped. Calibration is screen-only, so the
+        # paths stay None and no "Test finished" dialog is shown.
+        return SessionResult(state=SessionState.DONE)
