@@ -19,6 +19,10 @@ def backend():
         if not getattr(sys.modules.get("nidaqmx"), "__fake__", False):
             _fake_nidaqmx.install()
     import nidaqmx
+    # nidaqmx/__init__.py does NOT bind the system submodule, and System has
+    # never been a top-level attribute -- import it explicitly so callers can
+    # reach nidaqmx.system.System.
+    import nidaqmx.system  # noqa: F401
     return nidaqmx
 
 
@@ -43,7 +47,7 @@ def driver_available() -> bool:
     """True when the NI-DAQmx driver/runtime is installed and loadable."""
     try:
         nx = backend()
-        nx.System.local().devices  # touches the driver DLL/services
+        nx.system.System.local().devices  # touches the driver DLL/services
         return True
     except Exception:
         return False
@@ -53,6 +57,7 @@ def enumerate_devices() -> list[tuple[str, str]]:
     """[(name, product_type)] for every DAQ visible to the driver."""
     try:
         nx = backend()
-        return [(d.name, d.product_type) for d in nx.System.local().devices]
+        return [(d.name, d.product_type)
+                for d in nx.system.System.local().devices]
     except Exception:
         return []

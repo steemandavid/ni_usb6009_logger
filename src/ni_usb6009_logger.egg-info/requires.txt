@@ -1,5 +1,0 @@
-nidaqmx
-numpy
-
-[excel]
-openpyxl

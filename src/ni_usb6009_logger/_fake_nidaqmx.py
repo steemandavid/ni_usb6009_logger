@@ -289,16 +289,24 @@ class System:
         return _SystemLocal()
 
 
+# Mirror the real layout: System lives in the nidaqmx.system SUBMODULE, and
+# nidaqmx has no top-level System attribute. Exposing it the wrong way here is
+# what let core.daq call a non-existent nidaqmx.System and still pass CI.
+system = types.ModuleType("nidaqmx.system")
+system.System = System
+
+
 # --- top-level fake module --------------------------------------------------
 _nidaqmx = types.ModuleType("nidaqmx")
 _nidaqmx.__fake__ = True
 _nidaqmx.Task = Task
-_nidaqmx.System = System
 _nidaqmx.constants = constants
 _nidaqmx.errors = errors
 _nidaqmx.stream_readers = stream_readers
+_nidaqmx.system = system
 
-_SUBMODULES = ("nidaqmx.constants", "nidaqmx.errors", "nidaqmx.stream_readers")
+_SUBMODULES = ("nidaqmx.constants", "nidaqmx.errors",
+               "nidaqmx.stream_readers", "nidaqmx.system")
 
 
 def install():
@@ -306,7 +314,8 @@ def install():
         sys.modules[name] = {"nidaqmx": _nidaqmx,
                              "nidaqmx.constants": constants,
                              "nidaqmx.errors": errors,
-                             "nidaqmx.stream_readers": stream_readers}[name]
+                             "nidaqmx.stream_readers": stream_readers,
+                             "nidaqmx.system": system}[name]
 
 
 def uninstall():

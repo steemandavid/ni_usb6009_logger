@@ -42,7 +42,7 @@ def test_build_config_maps_flags(fake_daq, monkeypatch, tmp_path):
     assert cfg.ignition.igniter_line == "port1/line1"
     assert cfg.ignition.arm_seconds == 5.0
     assert cfg.ignition.sense_ai == "ai3"
-    assert cfg.outfile is None and str(cfg.logs_dir) == r".\logs"
+    assert cfg.outfile is None and cfg.logs_dir == Path("logs")
 
 
 def test_build_config_calibrate_defaults(fake_daq, monkeypatch, tmp_path):

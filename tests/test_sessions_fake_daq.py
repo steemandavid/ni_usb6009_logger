@@ -46,18 +46,18 @@ def test_logging_auto_named_no_overwrite(run_cli, tmp_path):
                      "--rate", "100", "--chunk", "10",
                      "--duration", "0.15", "--progress", "none")
         assert rc == 0
-    # Note: infer_output hardcodes Path(r".\logs") — on Linux this is a literal
-    # dir named '.\logs'; rglob covers both that and a proper 'logs' dir.
-    logs = sorted(tmp_path.rglob("ni_Dev1_*.csv"))
+    logs = sorted((tmp_path / "logs").glob("ni_Dev1_*.csv"))
     assert len(logs) == 2, "second run must not overwrite the first"
 
 
 def test_calibration_screen_only(run_cli, capsys, tmp_path):
-    import os
-    import signal as _signal
+    import _thread
     import threading
-    # Calibration runs until Ctrl+C; deliver SIGINT to the main thread after 1 s.
-    stopper = threading.Timer(1.0, lambda: os.kill(os.getpid(), _signal.SIGINT))
+    # Calibration runs until Ctrl+C; simulate one after 1 s. interrupt_main()
+    # trips SIGINT in the main thread and runs the handler cli.main() installed,
+    # exactly like a real Ctrl+C -- and unlike os.kill(os.getpid(), SIGINT),
+    # which on Windows falls through to TerminateProcess and kills the runner.
+    stopper = threading.Timer(1.0, _thread.interrupt_main)
     stopper.start()
     try:
         rc = run_cli("--device", "Dev1", "--channels", "ai0",

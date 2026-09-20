@@ -295,7 +295,7 @@ def _build_config(args) -> LoggerConfig:
         vmin=args.vmin,
         vmax=args.vmax,
         term=args.term,
-        logs_dir=Path(r".\logs"),
+        logs_dir=Path("logs"),
         outfile=Path(args.outfile) if args.outfile else None,
         fmt=args.format,
         duration=args.duration,

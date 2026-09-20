@@ -50,7 +50,7 @@ class LoggerConfig:
     vmin: float = -10.0
     vmax: float = 10.0
     term: str = "RSE"               # RSE | NRSE | DIFF
-    logs_dir: Path = Path(r".\logs")  # CLI default; GUI overrides
+    logs_dir: Path = Path("logs")   # CLI default; GUI overrides
     outfile: Path | None = None     # None -> auto-named under logs_dir
     fmt: str | None = None          # 'csv' | 'xlsx' | None (infer)
     duration: float | None = None

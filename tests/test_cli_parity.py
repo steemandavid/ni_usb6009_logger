@@ -26,7 +26,8 @@ def test_help_golden(cli, capsys):
     except SystemExit as e:
         assert e.code == 0
     out = capsys.readouterr().out
-    assert out == GOLDEN_HELP.read_text(), "--help output changed vs golden"
+    golden = GOLDEN_HELP.read_text(encoding="utf-8")
+    assert out == golden, "--help output changed vs golden"
 
 
 def test_parse_args_defaults(cli):
