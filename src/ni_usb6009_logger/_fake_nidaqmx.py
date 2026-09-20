@@ -1,6 +1,7 @@
 """In-memory fake of the nidaqmx API surface used by ni_usb6009_logger.
 
-Installed into ``sys.modules`` by conftest.py so the CLI and core can be
+Installed into ``sys.modules`` by tests/conftest.py (and by ``NI_USB6009_FAKE=1``
+for GUI development) so the CLI, core and GUI can be
 exercised on machines without the NI-DAQmx driver (development happens on
 Linux; the DAQ hardware is Windows-only).
 
@@ -246,6 +247,7 @@ class System:
 
 # --- top-level fake module --------------------------------------------------
 _nidaqmx = types.ModuleType("nidaqmx")
+_nidaqmx.__fake__ = True
 _nidaqmx.Task = Task
 _nidaqmx.System = System
 _nidaqmx.constants = constants
