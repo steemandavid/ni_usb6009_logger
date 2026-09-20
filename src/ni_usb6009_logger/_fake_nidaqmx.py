@@ -31,7 +31,13 @@ class State:
         self.ai_voltage_overrides = {}   # "Dev1/ai2" -> volts (constant)
         self.di_values = []              # bools returned by DI reads (cycled)
         self.do_writes = []              # [(lines_tuple, bool_tuple)] per write
+        self.do_write_times = []         # time.time() of each DO write
         self.read_time_scale = 1.0       # 0 = no simulated read blocking
+        # The USB-6009 has ONE analog-input timing engine: a second AI task on
+        # the same device is refused by the real driver (-50103). Modelling it
+        # keeps that constraint visible in CI instead of only on hardware.
+        self.single_ai_engine = True
+        self.ai_reservations = set()     # device names with a running AI task
 
 
 STATE = State()
@@ -42,7 +48,10 @@ def reset(devices=None):
     STATE.ai_voltage_overrides = {}
     STATE.di_values = []
     STATE.do_writes = []
+    STATE.do_write_times = []
     STATE.read_time_scale = 1.0
+    STATE.single_ai_engine = True
+    STATE.ai_reservations = set()
 
 
 def waveform(channel_index, sample_index, rate):
@@ -58,6 +67,11 @@ def waveform(channel_index, sample_index, rate):
 def do_write_sequences():
     """DO writes only, as tuples of bools, in order."""
     return [list(vals) for _lines, vals in STATE.do_writes]
+
+
+def do_write_times():
+    """Wall-clock time of each DO write, index-aligned with the sequences."""
+    return list(STATE.do_write_times)
 
 
 # --- constants module -------------------------------------------------------
@@ -141,6 +155,7 @@ class Task:
         self.timing = _Timing(self)
         self.in_stream = types.SimpleNamespace(task=self)
         self._closed = False
+        self._started = False
 
     # context manager, like the real Task
     def __enter__(self):
@@ -158,26 +173,53 @@ class Task:
                     f"Device requested by the task is not present in NI-DAQmx. ({dev})"
                 )
 
+    def _ai_device(self):
+        return self._ai[0].split("/", 1)[0] if self._ai else None
+
+    def _check_ai_engine(self):
+        """Refuse a second AI task on a device that already has one running."""
+        dev = self._ai_device()
+        if STATE.single_ai_engine and dev is not None and dev in STATE.ai_reservations:
+            raise DaqError(
+                "Specified resource is reserved. The operation could not be "
+                f"completed as specified. ({dev} analog input)")
+
     def control(self, mode):
         self._check_devices()
 
     def start(self):
         self._check_devices()
+        if self._ai and not self._started:
+            self._check_ai_engine()
+            dev = self._ai_device()
+            if dev is not None:
+                STATE.ai_reservations.add(dev)
+        self._started = True
 
     def stop(self):
-        pass
+        self._release_ai()
+        self._started = False
+
+    def _release_ai(self):
+        dev = self._ai_device()
+        if self._started and dev is not None:
+            STATE.ai_reservations.discard(dev)
 
     def close(self):
+        self.stop()
         self._closed = True
 
     def write(self, data, auto_start=False):
         if self._do:
             vals = tuple(bool(v) for v in data)
             STATE.do_writes.append((tuple(self._do), vals))
+            STATE.do_write_times.append(time.time())
             return len(vals)
         raise DaqError("write() on a task without DO channels")
 
     def read(self, number_of_samples_per_channel=1, timeout=10.0):
+        if self._ai and not self._started:
+            self._check_ai_engine()  # on-demand read auto-starts the task
         if self._di:
             n = len(self._di)
             src = STATE.di_values or [False]
@@ -213,6 +255,8 @@ class AnalogMultiChannelReader:
         if not task._ai:
             raise DaqError("no AI channels on task")
         task._check_devices()  # simulate mid-run unplug
+        if not task._started:
+            task._check_ai_engine()
         rate = task._rate or 1000.0
         # Simulate hardware cadence so duration-based loops behave like reality.
         if STATE.read_time_scale > 0:

@@ -37,6 +37,7 @@ class _Led(QLabel):
 class IgnitionPanel(QWidget):
     fire_permission_requested = Signal()
     abort_requested = Signal()
+    arm_confirmed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,6 +77,9 @@ class IgnitionPanel(QWidget):
         self.fire_btn.setEnabled(False)
         self.fire_btn.setStyleSheet(
             "font-size: 16pt; font-weight: bold; background-color: #d62728; color: white;")
+        # Keyboard focus would let the space bar drive pressed/released, i.e.
+        # grant fire permission without a deliberate pointer action.
+        self.fire_btn.setFocusPolicy(Qt.NoFocus)
         self.fire_btn.pressed.connect(self._hold_start)
         self.fire_btn.released.connect(self._hold_cancel)
 
@@ -97,6 +101,14 @@ class IgnitionPanel(QWidget):
         self._session_active = False
         self._last_state = None
         self.interactive = True  # False (CI/offscreen): auto-confirm dialogs
+        # Thresholds the core will actually enforce; fed in before each run so
+        # the LEDs agree with the configuration instead of the defaults.
+        self._continuity_min_ma = 0.2
+        self._leak_max_ma = 5.0
+
+    def set_thresholds(self, continuity_min_ma: float, leak_max_ma: float):
+        self._continuity_min_ma = float(continuity_min_ma)
+        self._leak_max_ma = float(leak_max_ma)
 
     # ------------------------------------------------------------- arming
     def _confirm_arm(self):
@@ -125,8 +137,6 @@ class IgnitionPanel(QWidget):
             self.arm_btn.setEnabled(False)
             self.arm_confirmed.emit()
 
-    arm_confirmed = Signal()
-
     # ---------------------------------------------------------- hold to fire
     def _hold_start(self):
         if self._held:
@@ -151,17 +161,21 @@ class IgnitionPanel(QWidget):
 
     # ------------------------------------------------------------- states
     def reset(self):
+        # An inhibit is the most safety-relevant thing the panel ever says;
+        # keep it on screen after the worker ends instead of blanking to Idle.
+        inhibited = self._last_state == SessionState.INHIBITED
         self._hold_timer.stop()
         self._held = False
         self._session_active = False
         self._last_state = None
         self.hold_progress.setValue(0)
         self.hold_progress.setFormat("hold FIRE for 2 s to ignite")
-        self.arm_status.setText("Idle")
+        if not inhibited:
+            self.arm_status.setText("Idle")
         self.led_do.set_state("ok")
         self.led_continuity.set_state("off")
         self.led_leak.set_state("off")
-        self.led_fire.set_state("off")
+        self.led_fire.set_state("off" if not inhibited else "bad")
         self.arm_btn.setText("ARM")
         self.arm_btn.setEnabled(True)
         self.fire_btn.setEnabled(False)
@@ -205,5 +219,7 @@ class IgnitionPanel(QWidget):
         else:
             self.arm_status.setText(
                 f"ARMING — {remaining:5.1f}s | igniter current {current_ma:7.2f} mA")
-            self.led_continuity.set_state("ok" if current_ma >= 0.2 else "warn")
-            self.led_leak.set_state("warn" if current_ma >= 5.0 else "ok")
+            self.led_continuity.set_state(
+                "ok" if current_ma >= self._continuity_min_ma else "warn")
+            self.led_leak.set_state(
+                "warn" if abs(current_ma) >= self._leak_max_ma else "ok")

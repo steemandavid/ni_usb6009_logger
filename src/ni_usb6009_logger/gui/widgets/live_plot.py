@@ -12,6 +12,10 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidg
 pg.setConfigOptions(antialias=False, background="w", foreground="k")
 
 _WINDOW_SECONDS = 60.0
+# Hard cap per channel (values + timestamps = 2 float64 arrays each): at the
+# panel's maximum 48 kHz × 8 channels an uncapped 60 s window would allocate
+# ~368 MB of buffers. 500 k points keeps that under ~64 MB.
+_MAX_POINTS = 500_000
 _COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd",
            "#ff7f0e", "#8c564b", "#e377c2", "#7f7f7f"]
 
@@ -62,6 +66,7 @@ class LivePlot(QWidget):
         self._curves = []
         self._t0 = None
         self._dirty = False
+        self._y_range = None
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -91,20 +96,27 @@ class LivePlot(QWidget):
         self._timer.setInterval(100)  # ~10 Hz repaint
         self._timer.timeout.connect(self._repaint)
 
-    def start(self, channels: list[str], rate: float, chunk: int):
-        """Configure for a new run and begin repainting."""
+    def start(self, channels: list[str], rate: float, chunk: int, y_range=None):
+        """Configure for a new run and begin repainting.
+
+        ``y_range`` is the configured AI range (vmin, vmax); the Y axis is
+        fixed to it so traces are read against the range that was set up.
+        """
         self.stop()
         self._channels = list(channels)
-        capacity = max(int(rate * _WINDOW_SECONDS), chunk * 4)
+        capacity = min(max(int(rate * _WINDOW_SECONDS), chunk * 4), max(_MAX_POINTS, chunk * 4))
         self._rings = [_Ring(capacity) for _ in self._channels]
         self.plot.clear()
-        self.plot.getPlotItem().legend.items = []
+        self._clear_legend()
         self._curves = []
         for i, name in enumerate(self._channels):
             c = self.plot.plot(pen=pg.mkPen(_COLORS[i % len(_COLORS)], width=1), name=name)
             self._curves.append(c)
         self._t0 = None
         self._dirty = False
+        self._y_range = y_range
+        if y_range is not None:
+            self.plot.setYRange(float(y_range[0]), float(y_range[1]), padding=0.02)
         self._legend_toggle.setCurrentIndex(1)
         self._follow = True
         self._timer.start()
@@ -113,11 +125,10 @@ class LivePlot(QWidget):
         self._timer.stop()
         self._repaint()
 
-    def clear(self):
-        self._channels, self._rings, self._curves = [], [], []
-        self.plot.clear()
-        self.plot.getPlotItem().legend.items = []
-        self._t0 = None
+    def _clear_legend(self):
+        legend = self.plot.getPlotItem().legend
+        if legend is not None:
+            legend.clear()  # public API; reaching into .items breaks on upgrades
 
     def append_block(self, block):
         """Queue one SampleBlock; drain on the next repaint tick."""
@@ -142,4 +153,7 @@ class LivePlot(QWidget):
             t, v = ring.snapshot()
             curve.setData(t, v)
         if self._follow:
-            self.plot.enableAutoRange(x=True, y=True)
+            if self._y_range is None:
+                self.plot.enableAutoRange(x=True, y=True)
+            else:
+                self.plot.enableAutoRange(x=True, y=False)

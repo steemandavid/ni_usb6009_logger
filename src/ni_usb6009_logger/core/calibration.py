@@ -5,6 +5,7 @@ console output is reproduced by the CLI's Reporter instead of print().
 """
 import time
 from collections import deque
+from contextlib import ExitStack
 
 import numpy as np
 
@@ -16,6 +17,15 @@ from ni_usb6009_logger.core.events import (
     SampleBlock,
     SessionState,
 )
+
+
+def calibration_chunk(rate_hw: float) -> int:
+    """Samples per read in calibration mode (~0.2 s of data).
+
+    Shared with the GUI so the plot's ring sizing cannot drift away from the
+    chunk the session actually reads.
+    """
+    return max(1, int(float(rate_hw) * 0.2))
 
 
 class CalibrationSession:
@@ -61,67 +71,64 @@ class CalibrationSession:
             f"MA window: {window_samples} sample(s) (~{window_seconds:.2f}s)"
         )
 
-        chunk = max(1, int(rate_hw * 0.2))
-        try:
-            with nx.Task() as ai_task:
-                # Multi-channel add in ONE call to avoid MIG error
-                phys = ",".join(ch_full)
-                ai_task.ai_channels.add_ai_voltage_chan(
-                    phys, min_val=cfg.vmin, max_val=cfg.vmax, terminal_config=TERM_MAP[cfg.term]
-                )
-                buf_samps = max(int(rate_hw * 3), chunk * 2)
-                ai_task.timing.cfg_samp_clk_timing(
-                    rate=rate_hw, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=buf_samps)
-                ai_task.control(TaskMode.TASK_VERIFY)
+        chunk = calibration_chunk(rate_hw)
+        # ExitStack owns both tasks: any failure during setup or acquisition
+        # still stops and closes them (a leaked task keeps the lines reserved).
+        with ExitStack() as stack:
+            ai_task = stack.enter_context(nx.Task())
+            stack.callback(daq.safe_stop, ai_task)
+            # Multi-channel add in ONE call to avoid MIG error
+            phys = ",".join(ch_full)
+            ai_task.ai_channels.add_ai_voltage_chan(
+                phys, min_val=cfg.vmin, max_val=cfg.vmax, terminal_config=TERM_MAP[cfg.term]
+            )
+            buf_samps = max(int(rate_hw * 3), chunk * 2)
+            ai_task.timing.cfg_samp_clk_timing(
+                rate=rate_hw, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=buf_samps)
+            ai_task.control(TaskMode.TASK_VERIFY)
 
-                di_task = None
-                if di_lines:
-                    di_task = nx.Task()
-                    for ln in di_lines:
-                        di_task.di_channels.add_di_chan(f"{cfg.device}/{ln}", line_grouping=LineGrouping.CHAN_PER_LINE)
-                    di_task.control(TaskMode.TASK_VERIFY)
+            di_task = None
+            if di_lines:
+                di_task = stack.enter_context(nx.Task())
+                stack.callback(daq.safe_stop, di_task)
+                for ln in di_lines:
+                    di_task.di_channels.add_di_chan(f"{cfg.device}/{ln}", line_grouping=LineGrouping.CHAN_PER_LINE)
+                di_task.control(TaskMode.TASK_VERIFY)
 
-                ai_reader = AnalogMultiChannelReader(ai_task.in_stream)
-                ch_count = len(ch_full)
-                ai_buf = np.zeros((ch_count, chunk), dtype=np.float64)
-                hist = [deque(maxlen=window_samples) for _ in range(ch_count)]
+            ai_reader = AnalogMultiChannelReader(ai_task.in_stream)
+            ch_count = len(ch_full)
+            ai_buf = np.zeros((ch_count, chunk), dtype=np.float64)
+            hist = [deque(maxlen=window_samples) for _ in range(ch_count)]
 
-                hdr = ["time"] + [f"{name}_avg" for name in ch_short]
-                if cal.show_raw: hdr += [f"{name}_raw" for name in ch_short]
-                hdr += [("di_" + ln.replace("/", "_")).replace(":", "_") for ln in di_lines]
-                rep.on_calib_header(hdr)
+            hdr = ["time"] + [f"{name}_avg" for name in ch_short]
+            if cal.show_raw: hdr += [f"{name}_raw" for name in ch_short]
+            hdr += [("di_" + ln.replace("/", "_")).replace(":", "_") for ln in di_lines]
+            rep.on_calib_header(hdr)
 
-                ai_task.start()
-                if di_task: di_task.start()
-                rep.on_state(SessionState.CALIBRATING)
+            ai_task.start()
+            if di_task: di_task.start()
+            rep.on_state(SessionState.CALIBRATING)
 
-                next_print = time.time()
-                while not stop.is_set():
-                    ai_reader.read_many_sample(
-                        ai_buf, number_of_samples_per_channel=chunk,
-                        timeout=max(2.0, chunk / rate_hw * 2))
-                    rep.on_sample_block(SampleBlock(
-                        time.time(), 1.0 / rate_hw, ai_buf.copy(), []))
-                    for j in range(chunk):
-                        for i in range(ch_count): hist[i].append(ai_buf[i, j])
+            next_print = time.time()
+            while not stop.is_set():
+                ai_reader.read_many_sample(
+                    ai_buf, number_of_samples_per_channel=chunk,
+                    timeout=max(2.0, chunk / rate_hw * 2))
+                rep.on_sample_block(SampleBlock(
+                    time.time(), 1.0 / rate_hw, ai_buf.copy(), []))
+                for j in range(chunk):
+                    for i in range(ch_count): hist[i].append(ai_buf[i, j])
 
-                    now = time.time()
-                    if now >= next_print:
-                        avgs = [sum(h) / len(h) if len(h) > 0 else 0.0 for h in hist]
-                        ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now))
-                        if di_task:
-                            di_vals = di_task.read()
-                            di_vals = [1 if bool(v) else 0 for v in di_vals]
-                        else:
-                            di_vals = []
-                        raw_vals = ai_buf[:, -1].tolist() if cal.show_raw else None
-                        rep.on_calib_row(CalibRow(ts_iso, avgs, raw_vals, di_vals))
-                        next_print = now + (1.0 / max(rate_out, 1e-6))
-        finally:
-            try: ai_task.stop()
-            except Exception: pass
-            if di_task:
-                try: di_task.stop()
-                except Exception: pass
-                di_task.close()
+                now = time.time()
+                if now >= next_print:
+                    avgs = [sum(h) / len(h) if len(h) > 0 else 0.0 for h in hist]
+                    ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now))
+                    if di_task:
+                        di_vals = di_task.read()
+                        di_vals = [1 if bool(v) else 0 for v in di_vals]
+                    else:
+                        di_vals = []
+                    raw_vals = ai_buf[:, -1].tolist() if cal.show_raw else None
+                    rep.on_calib_row(CalibRow(ts_iso, avgs, raw_vals, di_vals))
+                    next_print = now + (1.0 / max(rate_out, 1e-6))
         rep.on_state(SessionState.DONE)

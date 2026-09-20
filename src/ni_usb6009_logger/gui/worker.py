@@ -12,7 +12,6 @@ from ni_usb6009_logger.core.events import (
     CalibRow,
     Reporter,
     SampleBlock,
-    SessionResult,
     SessionState,
 )
 

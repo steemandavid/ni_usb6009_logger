@@ -34,18 +34,21 @@ class XLSXWriter(BaseWriter):
         self._path = path
         self._wb = Workbook(write_only=True)
         self._ws = self._wb.create_sheet(title=sheet_name)
-        self._saved = False
+        self._save_attempted = False
         if len(self._wb._sheets) > 1 and self._wb._sheets[0].title != sheet_name:
             self._wb.remove(self._wb._sheets[0])
     def write_header(self, header): self._ws.append(header)
     def write_row(self, row): self._ws.append(row)
     def flush(self): pass
     def close(self):
-        if self._saved:
+        # The flag is set *before* saving: session.py calls close() twice (once
+        # on the happy path, once from its finally). Retrying a failed save
+        # would raise a second time and mask the original exception.
+        if self._save_attempted:
             return
+        self._save_attempted = True
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._wb.save(str(self._path))
-        self._saved = True
 
 
 class TeeWriter(BaseWriter):
@@ -72,8 +75,12 @@ class TeeWriter(BaseWriter):
         self.recovery.flush()
 
     def close(self):
-        self.main.close()
-        self.recovery.close()
+        # The recovery copy must reach disk even when the main writer's close
+        # fails — a failing XLSX save is exactly when the crash copy matters.
+        try:
+            self.main.close()
+        finally:
+            self.recovery.close()
 
 
 def make_writer(path: Path, fmt: str, sheet_name: str = "DAQ") -> BaseWriter:

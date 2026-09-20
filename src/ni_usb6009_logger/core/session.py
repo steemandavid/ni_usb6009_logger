@@ -11,6 +11,7 @@ Behavior preservation:
 """
 import threading
 import time
+from contextlib import ExitStack
 
 import numpy as np
 
@@ -30,7 +31,12 @@ class IgnitionSetupError(Exception):
     """The ignition DO task could not be prepared (historic CLI exit code 3)."""
 
 
-_ARM_OK, _ARM_ABORTED, _ARM_LEAK, _ARM_NO_CONTINUITY = range(4)
+_ARM_OK, _ARM_ABORTED, _ARM_LEAK, _ARM_NO_CONTINUITY, _ARM_ERROR = range(5)
+
+# While ignition is enabled the AI stream is read in sub-blocks of about this
+# long, so opening the relay and honouring ABORT are never delayed by a full
+# chunk read (which is 1 s at the GUI defaults).
+_IGNITION_TICK_SECONDS = 0.02
 
 
 class LoggingSession:
@@ -105,7 +111,7 @@ class LoggingSession:
                 if arm == _ARM_ABORTED:
                     rep.on_state(SessionState.ABORTED)
                     return SessionResult(state=SessionState.ABORTED)
-                if arm in (_ARM_LEAK, _ARM_NO_CONTINUITY):
+                if arm in (_ARM_LEAK, _ARM_NO_CONTINUITY, _ARM_ERROR):
                     rep.on_state(SessionState.INHIBITED)
                     return SessionResult(state=SessionState.INHIBITED)
 
@@ -126,7 +132,11 @@ class LoggingSession:
 
             try:
                 rep.on_status("Creating AI task…")
-                with nx.Task() as ai_task:
+                # ExitStack owns every task: a failure anywhere below still
+                # stops and closes them, so the lines are not left reserved.
+                with ExitStack() as stack:
+                    ai_task = stack.enter_context(nx.Task())
+                    stack.callback(daq.safe_stop, ai_task)
                     # Multi-channel add in ONE call to avoid MIG error
                     phys = ",".join(ch_full)
                     ai_task.ai_channels.add_ai_voltage_chan(
@@ -140,7 +150,8 @@ class LoggingSession:
                     di_task = None
                     if di_lines:
                         rep.on_status("Creating DI task…")
-                        di_task = nx.Task()
+                        di_task = stack.enter_context(nx.Task())
+                        stack.callback(daq.safe_stop, di_task)
                         for ln in di_lines:
                             di_task.di_channels.add_di_chan(f"{cfg.device}/{ln}", line_grouping=LineGrouping.CHAN_PER_LINE)
                         rep.on_status("Verifying DI task…")
@@ -173,6 +184,56 @@ class LoggingSession:
                     fire_pending_announced = False
                     fire_at = (t0 + ign.stabilize_seconds) if do_task else None
                     fire_until = None
+                    confirm_pending = False
+
+                    # The USB-6009 has a single AI timing engine, so a second
+                    # AI task for the fire-confirm read is refused while the
+                    # main task runs. When the sense channel is part of the
+                    # main task, confirm from those samples instead.
+                    sense_short = ign.sense_ai.strip() if (do_task and ign.sense_ai) else None
+                    sense_index = ch_short.index(sense_short) if sense_short in ch_short else None
+
+                    # Sub-block reads keep relay-open and ABORT responsive.
+                    sub_chunk = cfg.chunk
+                    if do_task:
+                        sub_chunk = max(1, min(cfg.chunk, int(cfg.rate * _IGNITION_TICK_SECONDS)))
+                    sub_buf = (np.zeros((ch_count, sub_chunk), dtype=np.float64)
+                               if sub_chunk < cfg.chunk else None)
+
+                    def _relay_off(message="IGNITION: Relay OFF"):
+                        nonlocal fire_until
+                        if fire_until is None:
+                            return
+                        fire_until = None
+                        try:
+                            do_task.write([False, False], auto_start=True)
+                            rep.on_status(message)
+                        except Exception:
+                            pass
+
+                    def _read_chunk() -> int:
+                        """Fill ai_buf; returns the sample count actually read."""
+                        if sub_buf is None:
+                            ai_reader.read_many_sample(
+                                ai_buf, number_of_samples_per_channel=cfg.chunk,
+                                timeout=cfg.read_timeout)
+                            return cfg.chunk
+                        filled = 0
+                        while filled < cfg.chunk:
+                            n = min(sub_chunk, cfg.chunk - filled)
+                            buf = sub_buf if n == sub_chunk else \
+                                np.zeros((ch_count, n), dtype=np.float64)
+                            ai_reader.read_many_sample(
+                                buf, number_of_samples_per_channel=n,
+                                timeout=cfg.read_timeout)
+                            ai_buf[:, filled:filled + n] = buf[:, :n]
+                            filled += n
+                            if fire_until is not None and time.time() >= fire_until:
+                                _relay_off()
+                            if stop.is_set():
+                                _relay_off("IGNITION: Relay OFF (abort)")
+                                break
+                        return filled
 
                     while not stop.is_set():
                         now = time.time()
@@ -191,12 +252,20 @@ class LoggingSession:
                                     do_task.write([False, True], auto_start=True)  # igniter ON
                                     rep.on_status(f"\nIGNITION: Relay ON for {ign.pulse_seconds:.3f}s")
                                     rep.on_state(SessionState.FIRED)
-                                    sense_chan_full = (f"{cfg.device}/{ign.sense_ai.strip()}"
-                                                       if ign.sense_ai else None)
-                                    if sense_chan_full:
+                                    fire_until = now + ign.pulse_seconds
+                                    fired = True
+                                    if sense_index is not None:
+                                        # Confirm from the running task's own samples.
+                                        confirm_pending = True
+                                    elif ign.sense_ai:
+                                        sense_chan_full = f"{cfg.device}/{ign.sense_ai.strip()}"
+                                        # Range must cover the confirm current across
+                                        # the shunt (±1 V clipped at ~1 A on a 1 Ω shunt).
+                                        v_expect = (ign.fire_confirm_ma / 1000.0) * max(ign.shunt_ohms, 1e-9)
+                                        v_range = min(10.0, max(1.0, v_expect * 2.0))
                                         with nx.Task() as confirm_task:
                                             confirm_task.ai_channels.add_ai_voltage_chan(
-                                                sense_chan_full, min_val=-1.0, max_val=1.0,
+                                                sense_chan_full, min_val=-v_range, max_val=v_range,
                                                 terminal_config=TERM_MAP[ign.sense_term]
                                             )
                                             time.sleep(0.02)
@@ -207,19 +276,32 @@ class LoggingSession:
                                             if i_now_ma < ign.fire_confirm_ma:
                                                 rep.on_status("WARNING: Ignition current below confirm threshold – check wiring/supply/igniter.")
                                 except Exception as e:
-                                    rep.on_status(f"\nIGNITION ERROR: {e}")
-                                fire_until = now + ign.pulse_seconds
-                                fired = True
+                                    rep.on_status(
+                                        f"\nIGNITION ERROR: {e}\n"
+                                        "(fire-confirm only; add the sense channel to the AI "
+                                        "channel list to confirm from the running task)")
+                                    # The relay state is owned outside this block.
+                                    if fire_until is None:
+                                        fire_until = now + ign.pulse_seconds
+                                    fired = True
 
-                        if do_task and fired and fire_until and now >= fire_until:
-                            try:
-                                do_task.write([False, False], auto_start=True)
-                                rep.on_status("IGNITION: Relay OFF")
-                            except Exception: pass
-                            fire_until = None
+                        # Backstop for tiny chunks; the sub-block read above is
+                        # what normally opens the relay on time.
+                        if do_task and fired and fire_until is not None and time.time() >= fire_until:
+                            _relay_off()
 
-                        # Read AI chunk
-                        ai_reader.read_many_sample(ai_buf, number_of_samples_per_channel=cfg.chunk, timeout=cfg.read_timeout)
+                        # Read AI chunk (sub-blocked while ignition is enabled)
+                        n_read = _read_chunk()
+                        if n_read == 0:
+                            break
+
+                        if confirm_pending and sense_index is not None:
+                            confirm_pending = False
+                            peak_v = float(np.max(np.abs(ai_buf[sense_index, :n_read])))
+                            i_now_ma = compute_current_ma(peak_v, ign.shunt_ohms)
+                            rep.on_status(f"IGNITION confirm sample: {i_now_ma:.1f} mA")
+                            if i_now_ma < ign.fire_confirm_ma:
+                                rep.on_status("WARNING: Ignition current below confirm threshold – check wiring/supply/igniter.")
 
                         # DI snapshot once per chunk
                         if di_task:
@@ -228,10 +310,14 @@ class LoggingSession:
                         else:
                             di_vals = []
 
-                        chunk_start = time.time()
-                        rep.on_sample_block(SampleBlock(chunk_start, 1.0 / cfg.rate, ai_buf.copy(), list(di_vals)))
+                        # The samples in the buffer were acquired *before* the
+                        # read returned, so the first one is dated back by the
+                        # chunk duration instead of stamped at return time.
+                        chunk_start = time.time() - (n_read - 1) / cfg.rate
+                        rep.on_sample_block(SampleBlock(chunk_start, 1.0 / cfg.rate,
+                                                        ai_buf[:, :n_read].copy(), list(di_vals)))
 
-                        for i in range(cfg.chunk):
+                        for i in range(n_read):
                             ts = chunk_start + (i / cfg.rate)
                             ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts)) + f".{int((ts%1)*1e6):06d}"
                             row_vals = ai_buf[:, i].tolist()
@@ -242,7 +328,7 @@ class LoggingSession:
                                 rep.on_row_preview(row)
                                 remaining_print -= 1
 
-                        samples_total += cfg.chunk
+                        samples_total += n_read
 
                         # Periodic flush for CSV (main + recovery every chunk)
                         if isinstance(writer, TeeWriter):
@@ -265,10 +351,7 @@ class LoggingSession:
                     rep.on_state(state)
 
                     rep.on_status("Stopping tasks…")
-                    ai_task.stop()
-                    if di_task:
-                        di_task.stop()
-                        di_task.close()
+                    # ExitStack stops and closes both tasks on every exit path.
 
                 rep.on_status("Closing output…")
                 writer.close()
@@ -333,6 +416,15 @@ class LoggingSession:
                     v = float(buf[0, 0])
                     i_ma = compute_current_ma(v, ign.shunt_ohms)
                     rep.on_arming(max(0.0, t_end - time.time()), i_ma)
+                    if i_ma <= -ign.leak_max_ma:
+                        # Reversed sense wiring reads a real leak as a large
+                        # negative current; inhibit explicitly rather than by
+                        # falling through the continuity check.
+                        rep.on_status("\nSafety INHIBIT: implausible negative sense current "
+                                      "— check the current-sense wiring polarity.")
+                        do_task.write([False, False], auto_start=True)
+                        rep.on_status("Buzzer OFF. Ignition inhibited.")
+                        return _ARM_LEAK
                     if i_ma >= ign.leak_max_ma:
                         rep.on_status("\nSafety INHIBIT: leak current detected above limit before firing.")
                         do_task.write([False, False], auto_start=True)
@@ -352,16 +444,20 @@ class LoggingSession:
                 rep.on_status("\nSafety INHIBIT: igniter continuity not detected (below threshold).")
                 return _ARM_NO_CONTINUITY
 
-        except RuntimeError:
-            do_task.write([False, False], auto_start=True)
+        except RuntimeError as e:
+            # Not necessarily a leak: a read timeout or buffer error lands here
+            # too. Inhibit either way, but report what actually happened.
+            rep.on_status(f"\nSafety INHIBIT: current-sense check failed ({e}).")
+            try: do_task.write([False, False], auto_start=True)
+            except Exception: pass
             rep.on_status("Buzzer OFF. Ignition inhibited.")
-            return _ARM_LEAK
+            return _ARM_ERROR
         finally:
             try: do_task.write([False, False], auto_start=True)
             except Exception: pass
             rep.on_status("\rArming… done.                      \n")
             if sense_task:
-                try: sense_task.stop()
+                daq.safe_stop(sense_task)
+                try: sense_task.close()
                 except Exception: pass
-                sense_task.close()
         return _ARM_OK

@@ -13,7 +13,9 @@
 
 ```powershell
 pyinstaller packaging\ni_usb6009_gui.spec --noconfirm
-iscc /DAppVersion=1.2.0 packaging\installer.iss
+# SourceDir is relative to packaging\installer.iss, so the repo-root dist\
+# bundle is ..\dist\NI6009Logger (that is also the script's default).
+iscc /DAppVersion=1.2.0 /DSourceDir=..\dist\NI6009Logger packaging\installer.iss
 # result: packaging\Output\NI6009Logger_Setup_1.2.0.exe
 ```
 

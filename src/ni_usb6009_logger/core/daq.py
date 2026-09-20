@@ -31,6 +31,14 @@ def term_map() -> dict:
     }
 
 
+def safe_stop(task) -> None:
+    """Best-effort Task.stop(); a failure here must not mask the real error."""
+    try:
+        task.stop()
+    except Exception:
+        pass
+
+
 def driver_available() -> bool:
     """True when the NI-DAQmx driver/runtime is installed and loadable."""
     try:

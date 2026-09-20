@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ni_usb6009_logger"
-version = "1.1.0"
+dynamic = ["version"]
 description = "NI USB-6009 data logger for AI + DI with CSV/XLSX output, calibration moving average, and ignition sequence."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,5 +20,15 @@ gui = ["pyside6", "pyqtgraph", "openpyxl"]
 ni_usb6009_logger = "ni_usb6009_logger.cli:run"
 ni_usb6009_gui = "ni_usb6009_logger.gui.app:main"
 
+[tool.setuptools.dynamic]
+# Single source of truth: the installer version comes from __version__ too.
+version = { attr = "ni_usb6009_logger.__version__" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# Keeps bare `pytest` off "USB-6009 test scripts/test_ai.py", which imports the
+# real nidaqmx and aborts collection; CI can then run the whole suite.
+testpaths = ["tests"]
+

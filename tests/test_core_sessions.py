@@ -176,3 +176,144 @@ def test_fire_withheld_until_stop_aborts_without_fire(fake_daq, tmp_path):
     assert all(w != [False, True] for w in writes), "abort must not fire the relay"
     assert writes[-1] == [False, False], "DO lines forced LOW on abort"
     assert result_holder["r"].state == SessionState.ABORTED
+
+
+# --------------------------------------------- relay pulse timing & confirm
+class _StatusRecorder(Reporter):
+    def __init__(self):
+        self.lines = []
+
+    def on_status(self, text):
+        self.lines.append(text)
+
+    @property
+    def text(self):
+        return "\n".join(self.lines)
+
+
+def _pulse_cfg(tmp_path, **ign_kw):
+    """Chunk reads of 1 s against a 0.2 s pulse: quantization would show."""
+    ign = dict(buzzer_line="port1/line0", igniter_line="port1/line1",
+               arm_seconds=0.2, stabilize_seconds=0.2, pulse_seconds=0.2,
+               sense_ai="ai2", sense_term="RSE", sense_rate=200)
+    ign.update(ign_kw)
+    return LoggerConfig(
+        device="Dev1", channels=["ai0"], rate=100, chunk=100,
+        outfile=Path(tmp_path) / "fire.csv",
+        duration=3.0, update_interval=0.05,
+        ignition=IgnitionConfig(**ign),
+    )
+
+
+def _relay_on_seconds(fake_daq):
+    writes = fake_daq.do_write_sequences()
+    times = fake_daq.do_write_times()
+    on = writes.index([False, True])
+    off = writes.index([False, False], on + 1)
+    return times[off] - times[on]
+
+
+def test_relay_on_time_is_not_quantized_to_the_chunk_read(fake_daq, tmp_path):
+    fake_daq.STATE.ai_voltage_overrides["Dev1/ai2"] = 0.0003  # continuity OK
+    cfg = _pulse_cfg(tmp_path)
+    LoggingSession(cfg, Reporter()).run()
+    on_time = _relay_on_seconds(fake_daq)
+    assert on_time == pytest.approx(0.2, abs=0.15), (
+        f"relay stayed closed {on_time:.3f}s for a 0.2s pulse with 1s chunk reads")
+
+
+def test_abort_during_pulse_opens_the_relay_promptly(fake_daq, tmp_path):
+    fake_daq.STATE.ai_voltage_overrides["Dev1/ai2"] = 0.0003
+    rec = _StateRecorder()
+    stop = threading.Event()
+    cfg = _pulse_cfg(tmp_path, pulse_seconds=5.0)
+    t = threading.Thread(target=lambda: LoggingSession(cfg, rec).run(stop=stop))
+    t.start()
+    deadline = time.time() + 5
+    while not any(s == SessionState.FIRED for s in rec.states):
+        assert time.time() < deadline, f"never fired; states={rec.states}"
+        time.sleep(0.01)
+    time.sleep(0.05)
+    stop.set()
+    t.join(timeout=10)
+    assert not t.is_alive()
+    on_time = _relay_on_seconds(fake_daq)
+    assert on_time < 0.5, f"ABORT took {on_time:.3f}s to open the relay"
+    assert fake_daq.do_write_sequences()[-1] == [False, False]
+
+
+def test_fire_confirm_reads_from_the_running_task(fake_daq, tmp_path):
+    # 400 mA across the 1 Ω shunt: above the 300 mA confirm threshold, and far
+    # outside the ±1 V range a separate confirm task used to hardcode.
+    fake_daq.STATE.ai_voltage_overrides["Dev1/ai2"] = 0.4
+    rec = _StatusRecorder()
+    cfg = _pulse_cfg(tmp_path, leak_max_ma=900.0)  # the fake holds 400 mA throughout
+    cfg.channels = ["ai0", "ai2"]  # sense channel logged by the main task
+    LoggingSession(cfg, rec).run()
+    assert "IGNITION confirm sample: 400.0 mA" in rec.text
+    assert "below confirm threshold" not in rec.text
+    assert "IGNITION ERROR" not in rec.text, \
+        "no second AI task may be opened while the main task runs"
+
+
+def test_fire_confirm_on_a_separate_task_reports_the_driver_refusal(fake_daq, tmp_path):
+    # Sense channel not in the AI list: the confirm needs its own task, which a
+    # single-AI-engine device refuses. The pulse itself must be unaffected.
+    fake_daq.STATE.ai_voltage_overrides["Dev1/ai2"] = 0.0003
+    rec = _StatusRecorder()
+    LoggingSession(_pulse_cfg(tmp_path), rec).run()
+    assert "IGNITION ERROR" in rec.text
+    assert "add the sense channel to the AI channel list" in rec.text
+    writes = fake_daq.do_write_sequences()
+    assert [False, True] in writes and writes[-1] == [False, False]
+
+
+def test_arming_inhibits_on_reversed_sense_wiring(fake_daq, tmp_path):
+    fake_daq.STATE.ai_voltage_overrides["Dev1/ai2"] = -0.01  # -10 mA
+    rec = _StatusRecorder()
+    result = LoggingSession(_pulse_cfg(tmp_path), rec).run()
+    assert result.state == SessionState.INHIBITED
+    assert "implausible negative sense current" in rec.text
+    assert all(w != [False, True] for w in fake_daq.do_write_sequences())
+
+
+# --------------------------------------------------------- validation bounds
+@pytest.mark.parametrize("kw, expect", [
+    ({"rate": 0}, "sample rate"),
+    ({"chunk": 0}, "chunk size"),
+    ({"vmin": 5.0, "vmax": -5.0}, "AI range"),
+])
+def test_validate_rejects_out_of_range_numbers(fake_daq, kw, expect):
+    with pytest.raises(ConfigError) as e:
+        validate(LoggerConfig(channels=["ai0"], **kw))
+    assert expect in str(e.value) and e.value.exit_code == 2
+
+
+# ------------------------------------------------------ writer close ordering
+def test_tee_writer_flushes_recovery_when_the_main_writer_fails(tmp_path):
+    from ni_usb6009_logger.core.writers import CSVWriter, TeeWriter
+
+    class _Exploding(CSVWriter):
+        def close(self):
+            raise OSError("disk full")
+
+    rec_path = tmp_path / "rec.csv"
+    tee = TeeWriter(_Exploding(tmp_path / "main.csv"), CSVWriter(rec_path))
+    tee.write_header(["a"])
+    tee.write_row([1])
+    with pytest.raises(OSError):
+        tee.close()
+    assert rec_path.read_text().splitlines() == ["a", "1"], \
+        "the crash copy must still be flushed and closed"
+
+
+# --------------------------------------------- calibration setup error paths
+def test_calibration_setup_error_is_not_masked(fake_daq, tmp_path):
+    from ni_usb6009_logger.core.calibration import CalibrationSession
+
+    cfg = LoggerConfig(device="NoSuchDev", channels=["ai0"], rate=1.0,
+                       calibration=CalibrationConfig(sample_rate=50.0))
+    with pytest.raises(Exception) as e:
+        CalibrationSession(cfg, Reporter()).run()
+    assert "UnboundLocalError" not in type(e.value).__name__
+    assert "not present" in str(e.value)

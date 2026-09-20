@@ -1,4 +1,5 @@
-import sys, nidaqmx
+import sys
+import nidaqmx
 from nidaqmx.system import System
 from nidaqmx.constants import TerminalConfiguration
 

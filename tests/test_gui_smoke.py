@@ -9,10 +9,15 @@ import pytest
 
 
 @pytest.fixture
-def qapp(monkeypatch):
+def qapp(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("NI_USB6009_FAKE", "1")
+    from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication
+    # Keep persisted settings out of the developer's real profile.
+    settings_dir = tmp_path_factory.mktemp("qsettings")
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(settings_dir))
+    QSettings.setDefaultFormat(QSettings.IniFormat)
     app = QApplication.instance() or QApplication([])
     yield app
 
@@ -158,6 +163,12 @@ def _arm_window(qapp, fake_daq, tmp_path):
     win = _make_window(qapp, fake_daq, tmp_path)
     win.interactive = False
     win.ign_panel.interactive = False
+    # thresholds may have been restored from persisted settings: pin them
+    win.ign_cont_spin.setValue(0.2)
+    win.ign_leak_spin.setValue(5.0)
+    win.ign_confirm_spin.setValue(300.0)
+    win.ign_sense_edit.setText("ai2")
+    win.ign_sense_term.setCurrentText("RSE")
     # fast fake timings
     win.ign_arm_spin.setValue(0.3)
     win.ign_stab_spin.setValue(0.2)
@@ -228,4 +239,96 @@ def test_gui_ignition_abort_leaves_do_low(qapp, fake_daq, tmp_path):
     writes = fake_daq.do_write_sequences()
     assert all(w != [False, True] for w in writes), "no fire after abort"
     assert writes[-1] == [False, False], "DO forced LOW on abort"
+    win.close()
+
+
+def test_recovery_tab_lists_files_next_to_the_output(qapp, fake_daq, tmp_path):
+    # Browse only *suggests* logs_dir; the operator normally saves elsewhere,
+    # and the recovery copy lands next to the chosen output file.
+    out_dir = tmp_path / "elsewhere"
+    out_dir.mkdir()
+    win = _make_window(qapp, fake_daq, tmp_path)
+    win.outfile_edit.setText(str(out_dir / "run.csv"))
+    win._update_start_enabled()
+    win._start_logging()
+    _wait_worker_done(qapp, win)
+
+    assert (out_dir / "recovery" / "run_recovery_OK.csv").exists()
+    names = [win.recovery_list.item(i).text()
+             for i in range(win.recovery_list.count())]
+    assert any("run_recovery_OK.csv" in n for n in names), \
+        f"Recovery tab must list the files actually written; got {names}"
+    src = win.recovery_list.item(0).toolTip()
+    assert src.startswith(str(out_dir)), "Copy to… must point at the real file"
+    win.close()
+
+
+def test_settings_round_trip_keeps_ignition_thresholds(qapp, fake_daq, tmp_path):
+    from ni_usb6009_logger.gui import settings as gsettings
+    win = _make_window(qapp, fake_daq, tmp_path)
+    win.ign_cont_spin.setValue(0.5)
+    win.ign_leak_spin.setValue(50.0)
+    win.ign_confirm_spin.setValue(750.0)
+    win.ign_sense_term.setCurrentText("NRSE")
+    win.calib_window_spin.setValue(9.0)
+    # A plain log run must not drop the ignition parameters when it saves.
+    win._start_logging()
+    _wait_worker_done(qapp, win)
+    win.close()
+
+    cfg = gsettings.load_config()
+    assert cfg.ignition is not None and cfg.outfile is not None
+    assert cfg.ignition.continuity_min_ma == 0.5
+    assert cfg.ignition.leak_max_ma == 50.0
+    assert cfg.ignition.fire_confirm_ma == 750.0
+    assert cfg.ignition.sense_term == "NRSE"
+    assert cfg.calibration.window_seconds == 9.0
+
+    win2 = MainWindowFactory(qapp, fake_daq)
+    assert win2.ign_cont_spin.value() == 0.5
+    assert win2.ign_leak_spin.value() == 50.0
+    assert win2.ign_confirm_spin.value() == 750.0
+    assert win2.ign_sense_term.currentText() == "NRSE"
+    win2.close()
+
+
+def MainWindowFactory(qapp, fake_daq):
+    from ni_usb6009_logger.gui.main_window import MainWindow
+    win = MainWindow()
+    win.interactive = False
+    return win
+
+
+def test_fire_stays_blocked_during_arming(qapp, fake_daq, tmp_path):
+    win = _arm_window(qapp, fake_daq, tmp_path)
+    win.ign_arm_spin.setValue(1.5)
+    fake_daq.STATE.ai_voltage_overrides["Dev1/ai2"] = 0.0003
+    win.ign_panel._confirm_arm()
+    _wait_state(qapp, win, "ARMING")
+    assert not win.ign_panel.fire_btn.isEnabled(), "FIRE must be dead while arming"
+    win._stop_session()
+    _wait_worker_done(qapp, win)
+    win.close()
+
+
+def test_panel_leds_follow_the_configured_thresholds(qapp, fake_daq, tmp_path):
+    win = _make_window(qapp, fake_daq, tmp_path)
+    win.ign_cont_spin.setValue(1.0)
+    win.ign_leak_spin.setValue(50.0)
+    win.ign_panel.set_thresholds(win.ign_cont_spin.value(), win.ign_leak_spin.value())
+    win.ign_panel.set_arming(1.0, 10.0)  # 10 mA: continuity OK, no leak
+    assert "#2ca02c" in win.ign_panel.led_continuity.styleSheet()
+    assert "#2ca02c" in win.ign_panel.led_leak.styleSheet()
+    win.ign_panel.set_arming(1.0, 60.0)  # above the configured leak maximum
+    assert "#ff7f0e" in win.ign_panel.led_leak.styleSheet()
+    win.close()
+
+
+def test_typed_device_name_enables_start(qapp, fake_daq, tmp_path):
+    win = _make_window(qapp, fake_daq, tmp_path)
+    fake_daq.reset(devices=[])
+    win._poll_devices()
+    assert not win.log_start.isEnabled()
+    win.device_picker.combo.setEditText("Dev7")  # not visible to enumeration
+    assert win.log_start.isEnabled(), "a typed device must be usable (FSD §5)"
     win.close()

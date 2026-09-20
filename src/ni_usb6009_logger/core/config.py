@@ -73,6 +73,16 @@ def validate(cfg: LoggerConfig) -> None:
     """Raise ConfigError for invalid combinations (order matches the old CLI)."""
     if not cfg.channels:
         raise ConfigError("At least one analog input channel is required.")
+    if cfg.rate <= 0:
+        raise ConfigError("Error: the sample rate must be greater than 0 Hz.", exit_code=2)
+    if cfg.chunk <= 0:
+        raise ConfigError("Error: the chunk size must be at least 1 sample.", exit_code=2)
+    if cfg.vmin >= cfg.vmax:
+        raise ConfigError(
+            "Error: the AI range minimum must be below the maximum.", exit_code=2)
+    if cfg.calibration and cfg.calibration.sample_rate <= 0:
+        raise ConfigError(
+            "Error: the calibration sample rate must be greater than 0 Hz.", exit_code=2)
     if cfg.calibration and cfg.ignition:
         raise ConfigError(
             "Error: --ignite cannot be used together with --calibrate.",

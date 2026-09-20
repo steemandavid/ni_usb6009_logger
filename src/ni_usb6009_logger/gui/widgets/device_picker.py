@@ -7,11 +7,14 @@ from ni_usb6009_logger.core import daq
 
 class DevicePicker(QWidget):
     devices_changed = Signal(list)  # [(name, product_type)]
+    device_text_changed = Signal(str)  # manually typed / selected device name
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.combo = QComboBox()
         self.combo.setEditable(True)
+        self.combo.editTextChanged.connect(
+            lambda _text: self.device_text_changed.emit(self.current_device()))
         self.combo.setToolTip("DAQ device name as shown in NI MAX (auto-detected)")
         refresh = QPushButton("Refresh")
         refresh.setToolTip("Rescan for connected DAQ devices")

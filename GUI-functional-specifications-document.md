@@ -121,7 +121,7 @@ normally (offscreen rendering with `QT_QPA_PLATFORM=offscreen` for CI).
 | No device | Status bar "No DAQ detected — waiting for device…"; Start/ARM disabled; a **Refresh** button and a 2-second automatic rescan keep watching |
 | Hot-plug | Detected within ≤2 s; the combo and status bar update; Start/ARM enable when a device appears |
 | Hot-unplug **mid-run** | The DAQ read raises; the session stops safely (DO forced LOW by the core), a friendly dialog explains what happened and names the output + recovery files; all data written so far is on disk (§10) |
-| Typed name | The device field stays editable so a device not visible to enumeration can be entered manually |
+| Typed name | The device field stays editable so a device not visible to enumeration can be entered manually; typing a name enables Start/ARM even when enumeration returns nothing |
 
 ---
 
@@ -130,7 +130,9 @@ normally (offscreen rendering with `QT_QPA_PLATFORM=offscreen` for CI).
 1. **Precondition:** an output file must be chosen (**Browse…**) before **Start** is
    possible — Start stays disabled otherwise. Browse suggests
    `Documents\NI6009 Logs\ni_<device>_<timestamp>.csv`, offers CSV/XLSX filters, and
-   never overwrites (a `_1`, `_2`… suffix is appended to existing names).
+   never overwrites (a `_1`, `_2`… suffix is appended to existing names). The
+   suffixed name is applied immediately on selection, so the path shown in the
+   output box is the path that will be written.
 2. **Start** launches a logging session in the worker:
    - AI channels are hardware-timed at the sample rate; DI lines are snapshotted once
      per chunk (USB-6009 DI is static).
@@ -189,8 +191,20 @@ Rules:
   not the UI — identical protection as the CLI.
 - If fire-confirm current stays below threshold during the pulse, a warning is shown
   (wiring/supply/igniter check) — the relay still completes its pulse and switches off.
+- **Fire-confirm source:** the USB-6009 has a single AI timing engine, so a second AI
+  task cannot run alongside the acquisition task. When the current-sense channel is
+  included in the AI channel list, the confirm value is taken from the running task's
+  own samples (peak of the chunk covering the pulse) — this is the recommended
+  configuration. Otherwise the core attempts a separate task (range derived from
+  `fire_confirm_ma × shunt_ohms`) and reports a log message if the driver refuses it;
+  the pulse itself is unaffected either way.
+- **Pulse timing:** while ignition is enabled the AI stream is read in ~20 ms
+  sub-blocks rather than one chunk at a time, so the relay opens after
+  `pulse_seconds` (not after the current chunk read completes) and ABORT reaches the
+  hardware within a sub-block.
 - Closing the window during a session equals ABORT: the worker is stopped and the
-  core's exit path forces the DO lines LOW.
+  window stays open, behind a modal "stopping safely" indicator, until the worker has
+  actually finished and the core's exit path has forced the DO lines LOW.
 
 ---
 
@@ -198,7 +212,8 @@ Rules:
 
 - One curve per AI channel, distinct colors, legend with channel names.
 - Data appended chunk-by-chunk into fixed-capacity ring buffers (60 s window or
-  ≥4× chunk) — memory stays flat no matter the run length.
+  ≥4× chunk, capped at 500 000 points per channel) — memory stays flat no matter the
+  run length, and bounded at the panel's maximum rate × channel count.
 - Repaint throttled to ~10 Hz; PyQtGraph peak downsampling + clip-to-view keep
   multi-channel 1 kHz streaming smooth.
 - View toggle **follow live / pause view**; user may zoom/pan while paused.
@@ -215,7 +230,7 @@ Rules:
 | Format | Recovery is **always CSV flushed every chunk** (XLSX only reaches disk at close, so it cannot serve as the crash copy) |
 | Clean finish | Recovery file renamed `…_recovery_OK.csv` |
 | Interrupted run (crash, unplug, abort) | Recovery file remains without the `_OK` marker — partial data preserved on both sinks (writers close in a `finally`) |
-| Recovery tab | Lists all recovery files (newest first) with OK/INTERRUPTED status and size; **Copy to…** restores any file to a user-chosen location |
+| Recovery tab | Lists all recovery files (newest first) with OK/INTERRUPTED status and size, from the current output file's `recovery/` folder **and** the default logs folder; **Copy to…** restores any file to a user-chosen location |
 
 ---
 
@@ -223,6 +238,9 @@ Rules:
 
 - Whole configuration stored as one JSON blob under QSettings
   (`steeman.be` / `NI USB-6009 Logger`), versioned key `config_v1`.
+- Saved on every run start and on close, covering **all** panel fields — including
+  the calibration *and* ignition parameters regardless of which mode was started, so
+  the continuity/leak/fire-confirm thresholds survive a plain logging run.
 - Restored on launch (all panel fields, calibration and ignition parameters, output
   directory). Corrupt/missing settings fall back to defaults
   (`Documents\NI6009 Logs`).

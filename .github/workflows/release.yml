@@ -5,7 +5,26 @@ on:
     tags: ["v*"]
 
 jobs:
+  test:
+    # A tag must never publish an installer that the suite has not passed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy pytest pyside6 pyqtgraph openpyxl
+          sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon0 libdbus-1-3
+      - name: Full suite (fake DAQ)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q
+
   build-windows:
+    needs: test
     runs-on: windows-latest
     permissions:
       contents: write
@@ -40,12 +59,20 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Build installer
+        shell: pwsh
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-            /DAppVersion=$env:APP_VERSION `
-            /DSourceDir="dist\NI6009Logger" `
-            /DNiDaqSetup="..\packaging\nidaqmx\nidaqmx_setup.exe" `
-            packaging/installer.iss
+          # SourceDir is relative to packaging\installer.iss; PyInstaller wrote
+          # to the repo-root dist\. /DNiDaqSetup is only passed when the
+          # redistributable was actually downloaded, otherwise ISCC would fail
+          # on a missing source file.
+          $isccArgs = @(
+            "/DAppVersion=$env:APP_VERSION",
+            '/DSourceDir=..\dist\NI6009Logger'
+          )
+          if (Test-Path packaging/nidaqmx/nidaqmx_setup.exe) {
+            $isccArgs += '/DNiDaqSetup=nidaqmx\nidaqmx_setup.exe'
+          }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" @isccArgs packaging/installer.iss
       - name: Upload installer to GitHub Release
         uses: softprops/action-gh-release@v2
         with:

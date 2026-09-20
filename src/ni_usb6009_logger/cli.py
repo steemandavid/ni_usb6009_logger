@@ -191,6 +191,7 @@ class CliReporter(Reporter):
             self._progress_mode = "bar" if (args.duration and args.duration > 0) else "counter"
         self._progress_active = False
         self._preview_left = max(0, int(args.print_first))
+        self._digital_count = 0  # set by main() once the config is built
 
     # -- helpers
     def _write(self, text):
@@ -319,7 +320,9 @@ def main():
         stop.set()
         sys.stdout.write(reporter.interrupt_message())
         sys.stdout.flush()
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        # A second Ctrl+C must still break out of a wedged blocking read,
+        # so restore the default handler instead of ignoring the signal.
+        signal.signal(signal.SIGINT, signal.default_int_handler)
     prev_handler = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, _sigint)
 
@@ -334,6 +337,10 @@ def main():
     except IgnitionSetupError:
         # message already reported via on_status by the session
         sys.exit(3)
+    except KeyboardInterrupt:
+        # second Ctrl+C: stop now rather than print a traceback
+        print("\nInterrupted.")
+        sys.exit(130)
     finally:
         signal.signal(signal.SIGINT, prev_handler)
 

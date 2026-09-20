@@ -6,6 +6,8 @@ Supports:
 - Logging **analog inputs (AI)** and optional **digital inputs (DI)** to CSV or Excel (`.xlsx`).
 - Live **progress counter / bar** while logging.
 - **Safe filenames** (no overwrite; auto suffix).
+- **Row timestamps** date each chunk back by its acquisition duration, so a row's
+  time is when its sample was acquired, not when the read returned.
 - **Calibration mode**: screen-only output with moving average filtering.
 - **Ignition mode**: buzzer pre-warning, relay pulse, with **current-sense failsafe** using a shunt resistor.
 
@@ -122,11 +124,18 @@ ni_usb6009_logger --device Dev1 --channels ai0 --digital port0/line0:7 --rate 10
 
 ### 9. Ignition with current-sense failsafe (shunt in RSE mode)
 ```powershell
-ni_usb6009_logger --device Dev1 --channels ai0 --rate 1000 --term RSE ^
+ni_usb6009_logger --device Dev1 --channels ai0,ai2 --rate 1000 --term RSE ^
   --ignite --buzzer-line port1/line0 --igniter-line port1/line1 ^
   --igniter-sense-ai ai2 --sense-term RSE --shunt-ohms 1.0 ^
   --continuity-min-ma 0.2 --leak-max-ma 5 --fire-confirm-ma 300
 ```
+
+> **Include the sense channel (`ai2` above) in `--channels`.** The USB-6009 has a
+> single analog-input timing engine, so a second AI task cannot run next to the
+> acquisition task. When the sense channel is logged, the fire-confirm value is taken
+> from the running task's own samples (peak over the chunk covering the pulse). If it
+> is not, the logger falls back to a separate task, which the driver may refuse — the
+> pulse still completes, but the confirm reading is then reported as an error line.
 
 ### 10. My current test command
 ```powershell
@@ -152,6 +161,14 @@ Try restarting the _NI Configuration Manager_ service in Windows Control Panel, 
 
 https://knowledge.ni.com/KnowledgeArticleDetails?id=kA00Z000000PAp0SAG
 
+
+## Stopping a run
+
+`Ctrl+C` requests a clean stop: the current chunk finishes, files close, and (in
+ignition mode) the DO lines are forced LOW. A **second** `Ctrl+C` breaks out
+immediately (exit code 130) if a DAQ read is wedged.
+
+---
 
 ## Digital input notes (USB-6009)
 - Digital inputs are **static** (not hardware-timed).  
@@ -180,7 +197,10 @@ https://knowledge.ni.com/KnowledgeArticleDetails?id=kA00Z000000PAp0SAG
 - **Software thresholds**:  
   - `--continuity-min-ma`: require ≥0.2 mA for continuity before arming.  
   - `--leak-max-ma`: inhibit if ≥5 mA before firing.  
-  - `--fire-confirm-ma`: confirm if ≥300 mA during pulse.
+  - `--fire-confirm-ma`: confirm if ≥300 mA during pulse. The confirm measurement
+    range is derived from `fire-confirm-ma × shunt-ohms`, so multi-amp currents
+    (3–6 V across a 1 Ω shunt) are not clipped.
+  - A large **negative** sense current (reversed wiring) inhibits arming explicitly.
 
 ---
 

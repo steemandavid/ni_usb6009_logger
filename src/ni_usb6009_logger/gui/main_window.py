@@ -6,10 +6,12 @@ via the worker thread. Live plotting (Phase 4) and the ignition ARM/FIRE
 panel (Phase 5) plug into the same signals.
 """
 import time
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -22,8 +24,8 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressDialog,
     QPushButton,
-    QSpinBox,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -39,7 +41,8 @@ from ni_usb6009_logger.core.config import (
     LoggerConfig,
 )
 from ni_usb6009_logger.core.events import SessionState
-from ni_usb6009_logger.core.helpers import expand_digital_spec
+from ni_usb6009_logger.core.calibration import calibration_chunk
+from ni_usb6009_logger.core.helpers import expand_digital_spec, safe_path
 from ni_usb6009_logger.gui import settings as gsettings
 from ni_usb6009_logger.gui.widgets.device_picker import DevicePicker
 from ni_usb6009_logger.gui.worker import SessionWorker
@@ -55,6 +58,9 @@ class MainWindow(QMainWindow):
         self.worker = None
         self._session_kind = "log"
         self._device_present = False
+        self._device_names = []
+        self._device_typed = False
+        self._recovery_dir = None
         self.interactive = True  # False (CI/offscreen): log instead of dialogs
 
         self._build_ui()
@@ -88,6 +94,8 @@ class MainWindow(QMainWindow):
 
         self.device_picker = DevicePicker()
         self.device_picker.devices_changed.connect(self._on_devices_changed)
+        # A device that enumeration can't see may be typed in (FSD §5).
+        self.device_picker.device_text_changed.connect(self._on_device_typed)
         form.addRow("DAQ device", self.device_picker)
 
         self.channels_edit = QLineEdit("ai0")
@@ -311,10 +319,36 @@ class MainWindow(QMainWindow):
             self.ign_buzzer_edit.setText(c.ignition.buzzer_line)
             self.ign_relay_edit.setText(c.ignition.igniter_line)
             self.ign_sense_edit.setText(c.ignition.sense_ai or "")
+            self.ign_sense_term.setCurrentText(c.ignition.sense_term)
             self.ign_shunt_spin.setValue(c.ignition.shunt_ohms)
+            self.ign_cont_spin.setValue(c.ignition.continuity_min_ma)
+            self.ign_leak_spin.setValue(c.ignition.leak_max_ma)
+            self.ign_confirm_spin.setValue(c.ignition.fire_confirm_ma)
             self.ign_arm_spin.setValue(c.ignition.arm_seconds)
             self.ign_stab_spin.setValue(c.ignition.stabilize_seconds)
             self.ign_pulse_spin.setValue(c.ignition.pulse_seconds)
+
+    def _ignition_from_panel(self) -> IgnitionConfig:
+        return IgnitionConfig(
+            buzzer_line=self.ign_buzzer_edit.text().strip(),
+            igniter_line=self.ign_relay_edit.text().strip(),
+            arm_seconds=self.ign_arm_spin.value(),
+            stabilize_seconds=self.ign_stab_spin.value(),
+            pulse_seconds=self.ign_pulse_spin.value(),
+            sense_ai=self.ign_sense_edit.text().strip() or None,
+            shunt_ohms=self.ign_shunt_spin.value(),
+            continuity_min_ma=self.ign_cont_spin.value(),
+            leak_max_ma=self.ign_leak_spin.value(),
+            fire_confirm_ma=self.ign_confirm_spin.value(),
+            sense_term=self.ign_sense_term.currentText(),
+        )
+
+    def _calibration_from_panel(self) -> CalibrationConfig:
+        return CalibrationConfig(
+            rate_out=self.calib_rate_spin.value(),
+            window_seconds=self.calib_window_spin.value(),
+            sample_rate=self.calib_hw_spin.value(),
+        )
 
     def _panel_config(self, **extra) -> LoggerConfig:
         channels = [c.strip() for c in self.channels_edit.text().split(",") if c.strip()]
@@ -332,36 +366,61 @@ class MainWindow(QMainWindow):
             **extra,
         )
         self.cfg = cfg
-        gsettings.save_config(cfg)
+        self._save_panel_settings()
         return cfg
+
+    def _save_panel_settings(self):
+        """Persist every panel field (FSD §11), not just the running mode's.
+
+        The session config carries only one mode's sub-config; saving that
+        alone would drop the ignition thresholds whenever a plain log run is
+        started (and the output file whenever a calibration is started).
+        """
+        from dataclasses import replace
+        outfile = self.outfile_edit.text().strip()
+        cfg = replace(
+            self.cfg,
+            outfile=Path(outfile) if outfile else None,
+            calibration=self._calibration_from_panel(),
+            ignition=self._ignition_from_panel(),
+        )
+        gsettings.save_config(cfg)
 
     # ------------------------------------------------------------- devices
     def _on_devices_changed(self, devices):
         self._device_present = bool(devices)
+        self._device_names = [n for n, _ in devices]
         self._update_start_enabled()
         if len(devices) == 1:
             self.statusBar().showMessage(f"DAQ detected: {devices[0][0]} ({devices[0][1]})")
         elif not devices:
             self.statusBar().showMessage("No DAQ detected — waiting for device…")
 
+    def _on_device_typed(self, name):
+        # Only user edits reach here: rescan() sets the text with signals
+        # blocked, so a leftover auto-detected name never counts as typed.
+        self._device_typed = bool(name)
+        self._update_start_enabled()
+
     def _poll_devices(self):
         if self.worker is not None:
             return  # don't rescan mid-run
-        current = self.device_picker.current_device()
-        devices = daq.enumerate_devices()
-        names = [n for n, _ in devices]
-        if (current in names) != self._device_present or len(names) != len(devices):
+        names = [n for n, _ in daq.enumerate_devices()]
+        if names != self._device_names:
             self.device_picker.rescan()
 
     def _update_start_enabled(self):
         busy = self.worker is not None
         has_file = bool(self.outfile_edit.text())
-        self.log_start.setEnabled(self._device_present and has_file and not busy)
-        self.calib_start.setEnabled(self._device_present and not busy)
+        # A typed device name counts: enumeration can miss a device that is
+        # nonetheless usable, and that escape hatch is the point of the field.
+        device_ok = self._device_present or self._device_typed
+        self.log_start.setEnabled(device_ok and has_file and not busy)
+        self.calib_start.setEnabled(device_ok and not busy)
         self.stop_btn.setEnabled(busy)
         self.calib_stop.setEnabled(busy)
         self.ign_panel.interactive = self.interactive
-        self.ign_panel.arm_btn.setEnabled(self._device_present and has_file and not busy)
+        self.ign_panel.arm_btn.setEnabled(device_ok and has_file and not busy)
         if not has_file and not busy:
             self.log_message.setText("Pick an output file, then press Start.")
 
@@ -370,10 +429,15 @@ class MainWindow(QMainWindow):
         default = self.cfg.logs_dir
         default.mkdir(parents=True, exist_ok=True)
         suggested = default / f"ni_{self.device_picker.current_device() or 'Dev1'}_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        # Existing files are never overwritten: the session writes to a
+        # "_1"-suffixed name instead. Suppress Qt's overwrite confirmation and
+        # show the name that will actually be written, so the two agree.
         path, flt = QFileDialog.getSaveFileName(
             self, "Choose output file", str(suggested),
-            "CSV files (*.csv);;Excel files (*.xlsx)")
+            "CSV files (*.csv);;Excel files (*.xlsx)",
+            options=QFileDialog.DontConfirmOverwrite)
         if path:
+            path = str(safe_path(Path(path)))
             self.outfile_edit.setText(path)
             self._update_start_enabled()
             self.log_message.setText(f"Will log to {path} (a recovery copy is kept too)")
@@ -393,7 +457,6 @@ class MainWindow(QMainWindow):
         return w
 
     def _start_logging(self):
-        from pathlib import Path
         try:
             cfg = self._panel_config(
                 outfile=Path(self.outfile_edit.text()),
@@ -409,30 +472,20 @@ class MainWindow(QMainWindow):
 
     def _start_ignition(self):
         """ARM was confirmed in the panel: launch the ignition logging run."""
-        from pathlib import Path
         try:
             cfg = self._panel_config(
                 outfile=Path(self.outfile_edit.text()),
                 require_explicit_output=True,
                 recovery=True,
-                ignition=IgnitionConfig(
-                    buzzer_line=self.ign_buzzer_edit.text().strip(),
-                    igniter_line=self.ign_relay_edit.text().strip(),
-                    arm_seconds=self.ign_arm_spin.value(),
-                    stabilize_seconds=self.ign_stab_spin.value(),
-                    pulse_seconds=self.ign_pulse_spin.value(),
-                    sense_ai=self.ign_sense_edit.text().strip() or None,
-                    shunt_ohms=self.ign_shunt_spin.value(),
-                    continuity_min_ma=self.ign_cont_spin.value(),
-                    leak_max_ma=self.ign_leak_spin.value(),
-                    fire_confirm_ma=self.ign_confirm_spin.value(),
-                    sense_term=self.ign_sense_term.currentText(),
-                ),
+                ignition=self._ignition_from_panel(),
             )
         except ConfigError as e:
             QMessageBox.warning(self, "Cannot arm", str(e))
             self.ign_panel.reset()
             return
+        # The LEDs must reflect the thresholds the core will enforce.
+        self.ign_panel.set_thresholds(cfg.ignition.continuity_min_ma,
+                                      cfg.ignition.leak_max_ma)
         from ni_usb6009_logger.core.session import LoggingSession
         self._launch("ignite", lambda reporter: LoggingSession(cfg, reporter))
 
@@ -441,13 +494,11 @@ class MainWindow(QMainWindow):
             self.worker.request_fire()
 
     def _start_calibration(self):
-        cfg = self._panel_config(
-            calibration=CalibrationConfig(
-                rate_out=self.calib_rate_spin.value(),
-                window_seconds=self.calib_window_spin.value(),
-                sample_rate=self.calib_hw_spin.value(),
-            ),
-        )
+        try:
+            cfg = self._panel_config(calibration=self._calibration_from_panel())
+        except ConfigError as e:
+            QMessageBox.warning(self, "Cannot start", str(e))
+            return
         from ni_usb6009_logger.core.calibration import CalibrationSession
         self.calib_readout.setText("—")
         self._launch("calib", lambda reporter: CalibrationSession(cfg, reporter))
@@ -457,12 +508,12 @@ class MainWindow(QMainWindow):
         self.worker = self._make_worker(factory)
         self.worker.finished.connect(self._worker_gone)
         self.log_output.clear()
-        chunk = max(1, int(self.calib_hw_spin.value() * 0.2)) if kind == "calib" \
+        chunk = calibration_chunk(self.calib_hw_spin.value()) if kind == "calib" \
             else int(self.chunk_spin.value())
         rate = self.calib_hw_spin.value() if kind == "calib" else self.rate_spin.value()
         plot = self.calib_plot if kind == "calib" else self.log_plot
         plot.start([c.strip() for c in self.channels_edit.text().split(",") if c.strip()],
-                   rate, chunk)
+                   rate, chunk, y_range=(self.vmin_spin.value(), self.vmax_spin.value()))
         self._update_start_enabled()
         self.worker.start()
 
@@ -557,24 +608,49 @@ class MainWindow(QMainWindow):
         self._refresh_recovery()
 
     # ------------------------------------------------------------ recovery
+    def _recovery_dirs(self):
+        """Directories the session may have written recovery copies into.
+
+        The core writes them next to the output file ("<outfile parent>/
+        recovery"), which is usually *not* logs_dir — Browse only suggests
+        that folder as a starting point.
+        """
+        dirs = []
+        outfile = self.outfile_edit.text().strip()
+        if outfile:
+            dirs.append(Path(outfile).parent / "recovery")
+        dirs.append(Path(self.cfg.logs_dir) / "recovery")
+        uniq = []
+        for d in dirs:
+            if d not in uniq:
+                uniq.append(d)
+        return uniq
+
     def _refresh_recovery(self):
         self.recovery_list.clear()
-        rec_dir = self.cfg.logs_dir / "recovery"
-        if rec_dir.exists():
-            import os
-            for f in sorted(rec_dir.glob("*.csv"), key=os.path.getmtime, reverse=True):
-                status = "OK" if f.stem.endswith("_OK") else "INTERRUPTED"
-                size_kb = f.stat().st_size / 1024
-                self.recovery_list.addItem(f"{f.name}   [{status}, {size_kb:.0f} KB]")
+        import os
+        seen = set()
+        files = []
+        for rec_dir in self._recovery_dirs():
+            if not rec_dir.exists():
+                continue
+            for f in rec_dir.glob("*.csv"):
+                if f.resolve() not in seen:
+                    seen.add(f.resolve())
+                    files.append(f)
+        for f in sorted(files, key=os.path.getmtime, reverse=True):
+            status = "OK" if f.stem.endswith("_OK") else "INTERRUPTED"
+            size_kb = f.stat().st_size / 1024
+            self.recovery_list.addItem(f"{f.name}   [{status}, {size_kb:.0f} KB]")
+            self.recovery_list.item(self.recovery_list.count() - 1).setToolTip(str(f))
 
     def _copy_recovery(self):
         item = self.recovery_list.currentItem()
         if not item:
             return
-        name = item.text().split("   [")[0]
-        src = self.cfg.logs_dir / "recovery" / name
+        src = Path(item.toolTip())
         dest, _ = QFileDialog.getSaveFileName(self, "Copy recovery file",
-                                              str(self.cfg.logs_dir / name),
+                                              str(Path(self.cfg.logs_dir) / src.name),
                                               "CSV files (*.csv)")
         if dest:
             import shutil
@@ -583,11 +659,34 @@ class MainWindow(QMainWindow):
 
     # --------------------------------------------------------------- close
     def closeEvent(self, event):
-        if self.worker is not None:
-            self.worker.request_stop()
-            if not self.worker.wait(3000):
-                self.statusBar().showMessage("Forcing outputs safe…")
-                self.worker.wait(2000)
-        gsettings.save_config(self.cfg)
+        worker = self.worker
+        if worker is not None and worker.isRunning():
+            # Closing during a session equals ABORT (FSD §8.3). Only the core's
+            # exit path forces the DO lines LOW, so the window must not go away
+            # while the worker is still alive — with the relay possibly closed.
+            worker.request_stop()
+            self.statusBar().showMessage("Stopping safely — forcing outputs LOW…")
+            if not self._wait_for_worker(worker):
+                event.ignore()
+                return
+        self._save_panel_settings()
         super().closeEvent(event)
 
+    def _wait_for_worker(self, worker) -> bool:
+        """Wait for the session thread to finish, keeping the UI painted."""
+        if not self.interactive:
+            return worker.wait(30000)
+        dlg = QProgressDialog("Stopping the test safely…\n"
+                              "Waiting for the outputs to be forced LOW.",
+                              None, 0, 0, self)
+        dlg.setWindowTitle("Please wait")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setCancelButton(None)
+        dlg.show()
+        try:
+            while worker.isRunning():
+                QApplication.processEvents()
+                worker.wait(50)
+        finally:
+            dlg.close()
+        return True

@@ -30,13 +30,18 @@ def _excepthook(exc_type, exc, tb):
     """Last-resort handler: never show a raw traceback to the user."""
     from PySide6.QtWidgets import QApplication, QMessageBox
     detail = "".join(traceback.format_exception(exc_type, exc, tb))
-    if QApplication.instance() is not None:
+    print(detail, file=sys.stderr)
+    app = QApplication.instance()
+    if app is not None:
         QMessageBox.critical(
             None, "Unexpected error",
             "An unexpected error occurred:\n\n"
             f"{exc_type.__name__}: {exc}\n\n"
             "The app will now close. Details were written to the log output.")
-    print(detail, file=sys.stderr)
+        # Close for real: the windows' closeEvent still runs, so a session in
+        # progress is stopped and the DO lines are forced LOW.
+        app.closeAllWindows()
+        app.quit()
 
 
 def main(argv=None) -> int:
