@@ -214,6 +214,7 @@ class AnalogMultiChannelReader:
         task = self._task
         if not task._ai:
             raise DaqError("no AI channels on task")
+        task._check_devices()  # simulate mid-run unplug
         rate = task._rate or 1000.0
         # Simulate hardware cadence so duration-based loops behave like reality.
         if STATE.read_time_scale > 0:
@@ -241,7 +242,8 @@ class _SystemLocal:
 
 
 class System:
-    def local(self):
+    @staticmethod
+    def local():
         return _SystemLocal()
 
 

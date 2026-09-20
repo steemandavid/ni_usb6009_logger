@@ -18,6 +18,8 @@ class CSVWriter(BaseWriter):
     def write_row(self, row): self._writer.writerow(row)
     def flush(self): self._f.flush()
     def close(self):
+        if self._f.closed:
+            return
         try: self._f.flush()
         finally: self._f.close()
 
@@ -32,14 +34,18 @@ class XLSXWriter(BaseWriter):
         self._path = path
         self._wb = Workbook(write_only=True)
         self._ws = self._wb.create_sheet(title=sheet_name)
+        self._saved = False
         if len(self._wb._sheets) > 1 and self._wb._sheets[0].title != sheet_name:
             self._wb.remove(self._wb._sheets[0])
     def write_header(self, header): self._ws.append(header)
     def write_row(self, row): self._ws.append(row)
     def flush(self): pass
     def close(self):
+        if self._saved:
+            return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._wb.save(str(self._path))
+        self._saved = True
 
 
 class TeeWriter(BaseWriter):

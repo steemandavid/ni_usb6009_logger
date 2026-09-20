@@ -14,9 +14,11 @@ dependencies = ["nidaqmx", "numpy"]
 
 [project.optional-dependencies]
 excel = ["openpyxl"]
+gui = ["pyside6", "pyqtgraph", "openpyxl"]
 
 [project.scripts]
 ni_usb6009_logger = "ni_usb6009_logger.cli:run"
+ni_usb6009_gui = "ni_usb6009_logger.gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
