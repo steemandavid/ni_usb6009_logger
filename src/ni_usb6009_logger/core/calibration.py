@@ -10,7 +10,12 @@ import numpy as np
 
 from ni_usb6009_logger.core import daq
 from ni_usb6009_logger.core.config import LoggerConfig, validate
-from ni_usb6009_logger.core.events import CalibRow, Reporter, SessionState
+from ni_usb6009_logger.core.events import (
+    CalibRow,
+    Reporter,
+    SampleBlock,
+    SessionState,
+)
 
 
 class CalibrationSession:
@@ -18,7 +23,8 @@ class CalibrationSession:
         self.cfg = cfg
         self.rep = reporter
 
-    def run(self, stop=None) -> None:
+    def run(self, stop=None, fire_permission=None) -> None:
+        # fire_permission is ignition-only; accepted for worker uniformity.
         import threading
         if stop is None:
             stop = threading.Event()
@@ -94,6 +100,8 @@ class CalibrationSession:
                     ai_reader.read_many_sample(
                         ai_buf, number_of_samples_per_channel=chunk,
                         timeout=max(2.0, chunk / rate_hw * 2))
+                    rep.on_sample_block(SampleBlock(
+                        time.time(), 1.0 / rate_hw, ai_buf.copy(), []))
                     for j in range(chunk):
                         for i in range(ch_count): hist[i].append(ai_buf[i, j])
 

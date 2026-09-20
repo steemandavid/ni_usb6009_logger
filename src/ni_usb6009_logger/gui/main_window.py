@@ -53,6 +53,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"NI USB-6009 Logger — v{ni_usb6009_logger.__version__}")
         self.cfg = gsettings.load_config()
         self.worker = None
+        self._session_kind = "log"
         self._device_present = False
         self.interactive = True  # False (CI/offscreen): log instead of dialogs
 
@@ -157,6 +158,10 @@ class MainWindow(QMainWindow):
         self.log_message = QLabel("Pick an output file, then press Start.")
         lay.addWidget(self.log_message)
 
+        from ni_usb6009_logger.gui.widgets.live_plot import LivePlot
+        self.log_plot = LivePlot()
+        lay.addWidget(self.log_plot, 3)
+
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setMaximumBlockCount(2000)
@@ -177,18 +182,39 @@ class MainWindow(QMainWindow):
 
     def _build_calibrate_tab(self) -> QWidget:
         tab = QWidget()
-        form = QFormLayout(tab)
-        self.calib_window_spin = self._spin(0.0, 300.0, 5.0, 1.0, " s")
-        form.addRow("Moving-average window", self.calib_window_spin)
-        self.calib_rate_spin = self._spin(0.1, 50.0, 1.0, 0.5, " Hz")
-        form.addRow("Screen output rate", self.calib_rate_spin)
-        self.calib_hw_spin = self._spin(1.0, 1000.0, 100.0, 10.0, " Hz")
-        form.addRow("Internal sample rate", self.calib_hw_spin)
+        lay = QVBoxLayout(tab)
 
-        start = QPushButton("Start calibration")
-        start.clicked.connect(self._start_calibration)
-        self.calib_start = start
-        form.addRow(start)
+        controls = QFormLayout()
+        self.calib_window_spin = self._spin(0.0, 300.0, 5.0, 1.0, " s")
+        controls.addRow("Moving-average window", self.calib_window_spin)
+        self.calib_rate_spin = self._spin(0.1, 50.0, 1.0, 0.5, " Hz")
+        controls.addRow("Screen output rate", self.calib_rate_spin)
+        self.calib_hw_spin = self._spin(1.0, 1000.0, 100.0, 10.0, " Hz")
+        controls.addRow("Internal sample rate", self.calib_hw_spin)
+        lay.addLayout(controls)
+
+        # Big numeric readouts, one per channel, refreshed at the output rate
+        self.calib_readout = QLabel("—")
+        self.calib_readout.setAlignment(Qt.AlignCenter)
+        font = self.calib_readout.font()
+        font.setPointSize(font.pointSize() + 6)
+        self.calib_readout.setFont(font)
+        lay.addWidget(self.calib_readout)
+
+        from ni_usb6009_logger.gui.widgets.live_plot import LivePlot
+        self.calib_plot = LivePlot()
+        lay.addWidget(self.calib_plot, 1)
+
+        btns = QHBoxLayout()
+        self.calib_start = QPushButton("Start calibration")
+        self.calib_start.clicked.connect(self._start_calibration)
+        self.calib_stop = QPushButton("Stop")
+        self.calib_stop.setEnabled(False)
+        self.calib_stop.clicked.connect(self._stop_session)
+        btns.addWidget(self.calib_start)
+        btns.addWidget(self.calib_stop)
+        btns.addStretch(1)
+        lay.addLayout(btns)
         return tab
 
     def _build_ignite_tab(self) -> QWidget:
@@ -317,6 +343,7 @@ class MainWindow(QMainWindow):
         self.log_start.setEnabled(self._device_present and has_file and not busy)
         self.calib_start.setEnabled(self._device_present and not busy)
         self.stop_btn.setEnabled(busy)
+        self.calib_stop.setEnabled(busy)
         if not has_file and not busy:
             self.log_message.setText("Pick an output file, then press Start.")
 
@@ -338,9 +365,9 @@ class MainWindow(QMainWindow):
         w = SessionWorker(factory)
         w.state_changed.connect(self._on_state)
         w.status_text.connect(self.log_output.appendPlainText)
+        w.sample_block.connect(self._on_sample_block)
         w.calib_header.connect(lambda cols: self.log_output.appendPlainText(" | ".join(cols)))
-        w.calib_row.connect(lambda r: self.log_output.appendPlainText(
-            " | ".join([r.ts_iso] + [f"{v:.6f}" for v in r.averages])))
+        w.calib_row.connect(self._on_calib_row)
         w.progress_info.connect(self._on_progress)
         w.error_text.connect(self._on_worker_error)
         w.finished_result.connect(self._on_finished)
@@ -358,7 +385,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Cannot start", str(e))
             return
         from ni_usb6009_logger.core.session import LoggingSession
-        self._launch(lambda reporter: LoggingSession(cfg, reporter))
+        self.calib_readout.setText("—")
+        self._launch("log", lambda reporter: LoggingSession(cfg, reporter))
 
     def _start_calibration(self):
         cfg = self._panel_config(
@@ -369,14 +397,32 @@ class MainWindow(QMainWindow):
             ),
         )
         from ni_usb6009_logger.core.calibration import CalibrationSession
-        self._launch(lambda reporter: CalibrationSession(cfg, reporter))
+        self.calib_readout.setText("—")
+        self._launch("calib", lambda reporter: CalibrationSession(cfg, reporter))
 
-    def _launch(self, factory):
+    def _launch(self, kind, factory):
+        self._session_kind = kind
         self.worker = self._make_worker(factory)
         self.worker.finished.connect(self._worker_gone)
         self.log_output.clear()
+        chunk = max(1, int(self.calib_hw_spin.value() * 0.2)) if kind == "calib" \
+            else int(self.chunk_spin.value())
+        rate = self.calib_hw_spin.value() if kind == "calib" else self.rate_spin.value()
+        plot = self.calib_plot if kind == "calib" else self.log_plot
+        plot.start([c.strip() for c in self.channels_edit.text().split(",") if c.strip()],
+                   rate, chunk)
         self._update_start_enabled()
         self.worker.start()
+
+    def _on_sample_block(self, block):
+        plot = self.calib_plot if self._session_kind == "calib" else self.log_plot
+        plot.append_block(block)
+
+    def _on_calib_row(self, r):
+        parts = [f"{v:.6f}" for v in r.averages]
+        if r.raw is not None:
+            parts += [f"{v:.6f}" for v in r.raw]
+        self.calib_readout.setText("   |   ".join(parts))
 
     def _stop_session(self):
         if self.worker:
@@ -385,6 +431,8 @@ class MainWindow(QMainWindow):
 
     def _worker_gone(self):
         self.worker = None
+        self.log_plot.stop()
+        self.calib_plot.stop()
         self._update_start_enabled()
 
     # ------------------------------------------------------------- events

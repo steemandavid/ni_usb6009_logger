@@ -97,3 +97,58 @@ def test_gui_unplug_mid_run_is_graceful(qapp, fake_daq, tmp_path, monkeypatch):
     assert not (tmp_path / "recovery" / "run_recovery_OK.csv").exists()
     assert len((tmp_path / "run.csv").read_text().splitlines()) > 1
     win.close()
+
+
+def test_ring_buffer_bounds_memory(qapp):
+    import numpy as np
+    from ni_usb6009_logger.gui.widgets.live_plot import _Ring
+
+    r = _Ring(100)
+    big = np.arange(350, dtype=float)
+    r.append(big, big)  # far larger than capacity
+    t, v = r.snapshot()
+    assert len(v) == 100
+    assert list(v) == list(range(250, 350)), "keeps the newest capacity samples"
+
+    # wrap-around appends in small pieces
+    r2 = _Ring(10)
+    for start in range(0, 35, 5):
+        arr = np.arange(start, start + 5, dtype=float)
+        r2.append(arr, arr)
+    t2, v2 = r2.snapshot()
+    assert len(v2) == 10
+    assert list(v2) == [25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0]
+    assert list(t2) == list(v2)
+
+
+def test_gui_logging_feeds_plot(qapp, fake_daq, tmp_path):
+    win = _make_window(qapp, fake_daq, tmp_path)
+    win._start_logging()
+    _wait_worker_done(qapp, win)
+    plot = win.log_plot
+    assert plot._curves, "curves created for the configured channels"
+    for ring in plot._rings:
+        t, v = ring.snapshot()
+        assert len(t) > 0, "plot received sample blocks"
+        assert abs(t[-1]) < 60.0, "time axis is relative seconds"
+    win.close()
+
+
+def test_gui_calibration_feeds_readout_and_plot(qapp, fake_daq, tmp_path):
+    win = _make_window(qapp, fake_daq, tmp_path)
+    win.calib_hw_spin.setValue(50)
+    win.calib_rate_spin.setValue(10)
+    win._start_calibration()
+    # wait for first calib row, then press Stop
+    deadline = time.time() + 5
+    while win.calib_readout.text() in ("—", "") and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.02)
+    assert win.calib_readout.text() not in ("—", ""), "readout shows averages"
+    win._stop_session()
+    _wait_worker_done(qapp, win)
+    assert win.calib_plot._curves, "calibration plot configured"
+    for ring in win.calib_plot._rings:
+        t, v = ring.snapshot()
+        assert len(t) > 0
+    win.close()
