@@ -11,7 +11,6 @@ Behavior preservation:
 """
 import threading
 import time
-from pathlib import Path
 
 import numpy as np
 

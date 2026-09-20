@@ -1,0 +1,6 @@
+# Historic style: compact one-liner writers/helpers moved verbatim from the
+# original cli.py. F-level (real) errors stay visible.
+[flake8]
+max-line-length = 120
+extend-ignore = E203,W503,E701,E702,E301,E302,E305,E231,E128,E228,E501
+exclude = .venv,build,dist

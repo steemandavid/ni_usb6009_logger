@@ -206,7 +206,6 @@ class CliReporter(Reporter):
 
     # -- callbacks
     def on_state(self, state, detail=None):
-        prev_active = self._phase in (SessionState.LOGGING, SessionState.FIRE_PENDING)
         self._phase = state
         if state in (SessionState.DONE, SessionState.ABORTED, SessionState.INHIBITED,
                      SessionState.ERROR, SessionState.STOPPING) and self._progress_active:

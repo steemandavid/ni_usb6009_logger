@@ -14,8 +14,6 @@ import sys
 import time
 import types
 
-import numpy as np
-
 
 class DaqError(Exception):
     """Mirrors nidaqmx.errors.DaqError."""

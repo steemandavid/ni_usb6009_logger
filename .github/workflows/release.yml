@@ -1,0 +1,52 @@
+name: Release installer
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[gui,excel] pyinstaller
+      - name: Extract version
+        shell: pwsh
+        run: |
+          $v = python -c "import sys; sys.path.insert(0,'src'); import ni_usb6009_logger; print(ni_usb6009_logger.__version__)"
+          "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build PyInstaller bundle
+        run: pyinstaller packaging/ni_usb6009_gui.spec --noconfirm --distpath dist --workpath build
+      - name: Optionally fetch NI-DAQmx redistributable
+        shell: pwsh
+        env:
+          NIDAQMX_URL: ${{ vars.NIDAQMX_URL }}
+        run: |
+          if ($env:NIDAQMX_URL) {
+            New-Item -ItemType Directory -Force packaging/nidaqmx | Out-Null
+            Invoke-WebRequest -Uri $env:NIDAQMX_URL -OutFile packaging/nidaqmx/nidaqmx_setup.exe
+          } else {
+            Write-Host "NIDAQMX_URL not set: installer ships without the driver component;"
+            Write-Host "the app's driver-detection dialog guides the user instead."
+          }
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DAppVersion=$env:APP_VERSION `
+            /DSourceDir="dist\NI6009Logger" `
+            /DNiDaqSetup="..\packaging\nidaqmx\nidaqmx_setup.exe" `
+            packaging/installer.iss
+      - name: Upload installer to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/Output/NI6009Logger_Setup_*.exe
