@@ -216,7 +216,7 @@ class LoggingSession:
                         if sub_buf is None:
                             ai_reader.read_many_sample(
                                 ai_buf, number_of_samples_per_channel=cfg.chunk,
-                                timeout=cfg.read_timeout)
+                                timeout=cfg.read_timeout_for(cfg.chunk))
                             return cfg.chunk
                         filled = 0
                         while filled < cfg.chunk:
@@ -225,7 +225,7 @@ class LoggingSession:
                                 np.zeros((ch_count, n), dtype=np.float64)
                             ai_reader.read_many_sample(
                                 buf, number_of_samples_per_channel=n,
-                                timeout=cfg.read_timeout)
+                                timeout=cfg.read_timeout_for(n))
                             ai_buf[:, filled:filled + n] = buf[:, :n]
                             filled += n
                             if fire_until is not None and time.time() >= fire_until:

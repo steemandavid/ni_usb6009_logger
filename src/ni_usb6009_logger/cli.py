@@ -61,6 +61,7 @@ import sys
 import threading
 from pathlib import Path
 
+from ni_usb6009_logger.core import daq
 from ni_usb6009_logger.core.calibration import CalibrationSession
 from ni_usb6009_logger.core.config import (
     CalibrationConfig,
@@ -74,6 +75,7 @@ from ni_usb6009_logger.core.events import (
     SessionState,
 )
 from ni_usb6009_logger.core.helpers import (
+    configure_stdio,
     expand_digital_spec,
     progress_line_bar,
     progress_line_counter,
@@ -309,6 +311,9 @@ def _build_config(args) -> LoggerConfig:
 
 
 def main():
+    # Before parse_args(): argparse prints --help straight to stdout, and the
+    # help text itself contains a non-cp1252 character.
+    configure_stdio()
     args = parse_args()
     cfg = _build_config(args)
     reporter = CliReporter(args)
@@ -337,6 +342,13 @@ def main():
     except IgnitionSetupError:
         # message already reported via on_status by the session
         sys.exit(3)
+    except daq.daq_error_type() as e:
+        # The driver refused the configuration or the hardware failed mid-run.
+        # config.validate() catches the mistakes we can predict; this reports
+        # everything else in the driver's own words, which are specific (they
+        # name the property and its permitted range), instead of a traceback.
+        print(f"\nDAQ driver error:\n{e}")
+        sys.exit(1)
     except KeyboardInterrupt:
         # second Ctrl+C: stop now rather than print a traceback
         print("\nInterrupted.")

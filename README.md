@@ -144,6 +144,34 @@ ni_usb6009_logger --device Dev1 --channels ai0,ai1,ai2,ai3,ai4,ai5,ai6 --calibra
 
 
 ---
+## USB-6009 hardware limits
+
+The logger checks these before it creates a DAQ task, so a mistake gives a
+plain message and exit code 2 instead of a driver traceback:
+
+| Limit | Value |
+|---|---|
+| Max sample rate | **48 kS/s aggregate**, shared across all AI channels. Logging 4 channels caps `--rate` at 12000. |
+| Terminal config | **RSE** and **DIFF** only. The device has no NRSE mode, though `--term NRSE` parses. |
+| Differential channels | **ai0-ai3** only. Differential wiring pairs the inputs, so ai4-ai7 are single-ended (RSE) only. |
+
+Anything else the driver refuses is reported as `DAQ driver error:` followed by
+NI's own text, which names the offending property and its permitted range.
+
+### Testing without hardware
+
+Two options, in increasing fidelity:
+
+- `NI_USB6009_FAKE=1` swaps in an in-memory fake backend. No driver needed;
+  good for GUI and file-format work. It ignores terminal config and rate
+  limits, so it cannot catch the mistakes above.
+- An **NI-DAQmx simulated device** (NI MAX -> Devices and Interfaces -> Create
+  New -> NI-DAQmx Simulated Device -> USB-6009) goes through the real driver,
+  with real error codes and real validation. Use this to verify anything that
+  talks to the driver. AI returns a driver-generated sine and DO writes go
+  nowhere physical, so ignition still needs the bench.
+
+---
 ## Errors
 
 ```

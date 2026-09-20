@@ -3,10 +3,30 @@
 infer_output now takes the LoggerConfig (logs dir configurable for the GUI;
 the CLI keeps the historic '.\\logs' default).
 """
+import sys
 import time
 from pathlib import Path
 
 from ni_usb6009_logger.core.config import LoggerConfig
+
+
+def configure_stdio() -> None:
+    """Make stdout/stderr survive non-ASCII on Windows.
+
+    Python only uses the Unicode console API when stdout IS a console; once it
+    is redirected or piped it falls back to the locale encoding, which on a
+    Western Windows install is cp1252. Five characters the CLI prints have no
+    cp1252 mapping -- U+2248 in --help, U+2192 in the per-run status line,
+    U+2588 in the progress bar and U+03A9 in the ignition messages -- so
+    `ni_usb6009_logger --help > out.txt` died with UnicodeEncodeError before
+    printing anything useful. UTF-8 keeps the glyphs where the terminal can
+    show them; errors="replace" guarantees output never raises again.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass  # already detached, or not a reconfigurable text stream
 
 
 def safe_path(path: Path) -> Path:

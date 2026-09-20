@@ -19,10 +19,16 @@ def backend():
         if not getattr(sys.modules.get("nidaqmx"), "__fake__", False):
             _fake_nidaqmx.install()
     import nidaqmx
-    # nidaqmx/__init__.py does NOT bind the system submodule, and System has
-    # never been a top-level attribute -- import it explicitly so callers can
-    # reach nidaqmx.system.System.
-    import nidaqmx.system  # noqa: F401
+    # Which submodules nidaqmx/__init__.py binds is a version detail, and it
+    # binds neither `system` nor `stream_readers` as of 1.6.0 -- `System` has
+    # never been a top-level attribute at all. Import every submodule the
+    # package reaches through backend() so nx.<sub> is guaranteed, whatever
+    # __init__ does. Accessing one it did not happen to bind is how
+    # driver_available() and the AnalogMultiChannelReader lookup both broke.
+    import nidaqmx.constants    # noqa: F401
+    import nidaqmx.errors       # noqa: F401
+    import nidaqmx.stream_readers  # noqa: F401
+    import nidaqmx.system       # noqa: F401
     return nidaqmx
 
 
@@ -51,6 +57,21 @@ def driver_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def daq_error_type() -> type[BaseException]:
+    """The backend's DaqError class, for front-ends that catch it.
+
+    Resolved through backend() so a front-end never imports nidaqmx itself and
+    so the fake's DaqError is matched under NI_USB6009_FAKE. Falls back to a
+    class that catches nothing when the driver is unavailable.
+    """
+    try:
+        return backend().errors.DaqError
+    except Exception:
+        class _NeverRaised(Exception):
+            pass
+        return _NeverRaised
 
 
 def enumerate_devices() -> list[tuple[str, str]]:

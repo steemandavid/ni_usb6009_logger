@@ -292,6 +292,9 @@ class System:
 # Mirror the real layout: System lives in the nidaqmx.system SUBMODULE, and
 # nidaqmx has no top-level System attribute. Exposing it the wrong way here is
 # what let core.daq call a non-existent nidaqmx.System and still pass CI.
+# The attributes set on the fake module below mirror real nidaqmx AS
+# daq.backend() leaves it -- i.e. after backend() has imported every submodule
+# explicitly. Do not add an attribute here that backend() does not import.
 system = types.ModuleType("nidaqmx.system")
 system.System = System
 

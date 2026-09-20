@@ -141,11 +141,15 @@ def test_ignition_no_continuity_inhibits_fire(run_cli, fake_daq, capsys):
     assert "continuity not detected" in capsys.readouterr().out
 
 
-def test_missing_device_raises(run_cli, fake_daq, capsys):
-    import pytest
+def test_missing_device_reports_driver_error(run_cli, fake_daq, capsys):
     fake_daq.reset(devices=[])  # DAQ unplugged
-    # AI task verification fails → DaqError propagates (today's behavior)
-    with pytest.raises(Exception):
-        run_cli("--device", "Dev1", "--channels", "ai0",
-                "--rate", "100", "--chunk", "10", "--duration", "0.2",
-                "--progress", "none")
+    # AI task verification fails. The DaqError used to propagate as a raw
+    # traceback; cli.main() now reports it in the driver's own words.
+    rc = run_cli("--device", "Dev1", "--channels", "ai0",
+                 "--rate", "100", "--chunk", "10", "--duration", "0.2",
+                 "--progress", "none")
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "DAQ driver error:" in out
+    assert "not present in NI-DAQmx" in out
+    assert "Traceback" not in out

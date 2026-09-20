@@ -317,3 +317,73 @@ def test_calibration_setup_error_is_not_masked(fake_daq, tmp_path):
         CalibrationSession(cfg, Reporter()).run()
     assert "UnboundLocalError" not in type(e.value).__name__
     assert "not present" in str(e.value)
+
+
+# ------------------------------------------------- USB-6009 hardware limits
+# These mirror constraints the real driver enforces with -200077/-200284. The
+# fake backend cannot: it ignores terminal_config and min/max rate entirely,
+# so every case here was first confirmed against an NI-DAQmx simulated
+# USB-6009 before being pinned down as a unit test.
+def test_rate_above_aggregate_ceiling_rejected():
+    cfg = LoggerConfig(channels=["ai0", "ai1"], rate=60000.0)
+    with pytest.raises(ConfigError) as e:
+        validate(cfg)
+    assert "48000 S/s in total" in str(e.value)
+    assert "24000 Hz" in str(e.value), "must suggest the per-channel maximum"
+    assert e.value.exit_code == 2
+
+
+def test_rate_at_aggregate_ceiling_allowed():
+    validate(LoggerConfig(channels=["ai0", "ai1", "ai2", "ai3"], rate=12000.0))
+
+
+def test_nrse_rejected_for_usb6009():
+    with pytest.raises(ConfigError) as e:
+        validate(LoggerConfig(channels=["ai0"], term="NRSE"))
+    assert "NRSE is not supported" in str(e.value)
+    assert e.value.exit_code == 2
+
+
+def test_diff_rejects_single_ended_only_channels():
+    cfg = LoggerConfig(channels=["ai0", "ai4", "ai6"], term="DIFF")
+    with pytest.raises(ConfigError) as e:
+        validate(cfg)
+    msg = str(e.value)
+    assert "ai4, ai6" in msg and "ai0" not in msg.split("cannot be used")[0]
+    assert e.value.exit_code == 2
+
+
+def test_diff_allows_ai0_to_ai3():
+    validate(LoggerConfig(channels=["ai0", "ai1", "ai2", "ai3"], term="DIFF"))
+
+
+def test_ignition_sense_terminal_config_validated():
+    cfg = LoggerConfig(
+        channels=["ai0"],
+        ignition=IgnitionConfig(buzzer_line="port1/line0",
+                                igniter_line="port1/line1",
+                                sense_ai="ai5", sense_term="DIFF"),
+    )
+    with pytest.raises(ConfigError) as e:
+        validate(cfg)
+    assert "ai5" in str(e.value) and "--sense-term" in str(e.value)
+
+
+# ------------------------------------------------------------ read timeouts
+def test_read_timeout_scales_with_acquisition_time():
+    # 1000 samples at 50 Hz take 20 s; a fixed 10 s timeout made the very
+    # first read fail with DaqError -200284 on real hardware.
+    cfg = LoggerConfig(channels=["ai0"], rate=50.0, chunk=1000)
+    assert cfg.read_timeout_for(1000) > 20.0
+
+
+def test_read_timeout_keeps_floor_for_fast_chunks():
+    # 1000 samples at 1 kHz take 1 s: the 10 s floor still applies, so USB
+    # latency on a short chunk does not trip a 2.5 s timeout.
+    cfg = LoggerConfig(channels=["ai0"], rate=1000.0, chunk=1000)
+    assert cfg.read_timeout_for(1000) == cfg.read_timeout
+
+
+def test_read_timeout_survives_zero_rate():
+    cfg = LoggerConfig(channels=["ai0"], rate=0.0)
+    assert cfg.read_timeout_for(100) == cfg.read_timeout

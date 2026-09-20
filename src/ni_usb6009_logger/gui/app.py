@@ -8,6 +8,7 @@ import sys
 import traceback
 
 from ni_usb6009_logger.core import daq
+from ni_usb6009_logger.core.helpers import configure_stdio
 
 NI_DRIVER_URL = "https://www.ni.com/en/shop/model/ni-daqmx.html"
 
@@ -45,6 +46,10 @@ def _excepthook(exc_type, exc, tb):
 
 
 def main(argv=None) -> int:
+    # --selftest prints to stdout, and _excepthook writes tracebacks there --
+    # a DAQ error message carrying the ignition messages' U+03A9 would
+    # otherwise raise UnicodeEncodeError while reporting the real error.
+    configure_stdio()
     argv = list(sys.argv if argv is None else argv)
     if "--selftest" in argv:
         return _selftest()
