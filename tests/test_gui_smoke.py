@@ -152,3 +152,80 @@ def test_gui_calibration_feeds_readout_and_plot(qapp, fake_daq, tmp_path):
         t, v = ring.snapshot()
         assert len(t) > 0
     win.close()
+
+
+def _arm_window(qapp, fake_daq, tmp_path):
+    win = _make_window(qapp, fake_daq, tmp_path)
+    win.interactive = False
+    win.ign_panel.interactive = False
+    # fast fake timings
+    win.ign_arm_spin.setValue(0.3)
+    win.ign_stab_spin.setValue(0.2)
+    win.ign_pulse_spin.setValue(0.2)
+    win.duration_spin.setValue(0.0)  # run until aborted
+    win._update_start_enabled()
+    return win
+
+
+def _wait_state(qapp, win, name_or_state, timeout=8.0):
+    from ni_usb6009_logger.core.events import SessionState as S
+    target = name_or_state if isinstance(name_or_state, S) else S[name_or_state]
+    deadline = time.time() + timeout
+    while win.ign_panel._last_state != target:
+        assert time.time() < deadline, f"state {target} not reached"
+        qapp.processEvents()
+        time.sleep(0.02)
+
+
+def test_gui_ignition_full_flow(qapp, fake_daq, tmp_path):
+    win = _arm_window(qapp, fake_daq, tmp_path)
+    fake_daq.STATE.ai_voltage_overrides["Dev1/ai2"] = 0.0003  # continuity OK
+    assert win.ign_panel.arm_btn.isEnabled(), "device + outfile -> ARM available"
+    win.ign_panel._confirm_arm()   # non-interactive: auto-confirms
+    assert win.worker is not None
+
+    # LOGGING is transient (~stabilize time); wait for the gated state
+    _wait_state(qapp, win, "FIRE_PENDING")
+    assert win.ign_panel.fire_btn.isEnabled(), "FIRE available after stabilization"
+
+    # simulate the 2-second hold via the panel's hold timer at full speed
+    win.ign_panel._hold_start()
+    while not win.ign_panel._held:
+        qapp.processEvents()
+        win.ign_panel._hold_tick()
+    _wait_state(qapp, win, "FIRED")
+    win._stop_session()
+    _wait_worker_done(qapp, win)
+
+    writes = fake_daq.do_write_sequences()
+    assert writes[0] == [False, False]
+    assert [True, False] in writes and [False, True] in writes
+    assert writes[-1] == [False, False]
+    assert (tmp_path / "run.csv").exists()
+    win.close()
+
+
+def test_gui_ignition_leak_inhibits_and_blocks_fire(qapp, fake_daq, tmp_path):
+    win = _arm_window(qapp, fake_daq, tmp_path)
+    fake_daq.STATE.ai_voltage_overrides["Dev1/ai2"] = 0.01  # 10 mA leak
+    win.ign_panel._confirm_arm()
+    _wait_worker_done(qapp, win, timeout=8)
+    assert not win.ign_panel.fire_btn.isEnabled(), "FIRE must stay blocked"
+    writes = fake_daq.do_write_sequences()
+    assert all(w != [False, True] for w in writes), "relay must never fire"
+    assert writes[-1] == [False, False]
+    assert "INHIBIT" in win.log_output.toPlainText()
+    win.close()
+
+
+def test_gui_ignition_abort_leaves_do_low(qapp, fake_daq, tmp_path):
+    win = _arm_window(qapp, fake_daq, tmp_path)
+    fake_daq.STATE.ai_voltage_overrides["Dev1/ai2"] = 0.0003
+    win.ign_panel._confirm_arm()
+    _wait_state(qapp, win, "FIRE_PENDING")
+    win.ign_panel.abort_btn.click()
+    _wait_worker_done(qapp, win)
+    writes = fake_daq.do_write_sequences()
+    assert all(w != [False, True] for w in writes), "no fire after abort"
+    assert writes[-1] == [False, False], "DO forced LOW on abort"
+    win.close()

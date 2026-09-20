@@ -135,14 +135,12 @@ class MainWindow(QMainWindow):
         holder = QWidget()
         lay = QVBoxLayout(holder)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(tabs)
+        lay.addWidget(self._build_outfile_box())
+        lay.addWidget(tabs, 1)
         return holder
 
-    def _build_log_tab(self) -> QWidget:
-        tab = QWidget()
-        lay = QVBoxLayout(tab)
-
-        file_box = QGroupBox("Output file (required before starting)")
+    def _build_outfile_box(self) -> QWidget:
+        file_box = QGroupBox("Output file (required before Log or Ignite tests; a recovery copy is always kept)")
         fform = QFormLayout(file_box)
         row = QHBoxLayout()
         self.outfile_edit = QLineEdit()
@@ -153,9 +151,13 @@ class MainWindow(QMainWindow):
         row.addWidget(self.outfile_edit, 1)
         row.addWidget(browse)
         fform.addRow(row)
-        lay.addWidget(file_box)
+        return file_box
 
-        self.log_message = QLabel("Pick an output file, then press Start.")
+    def _build_log_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+
+        self.log_message = QLabel("Pick an output file (above), then press Start.")
         lay.addWidget(self.log_message)
 
         from ni_usb6009_logger.gui.widgets.live_plot import LivePlot
@@ -219,7 +221,8 @@ class MainWindow(QMainWindow):
 
     def _build_ignite_tab(self) -> QWidget:
         tab = QWidget()
-        lay = QVBoxLayout(tab)
+        lay = QHBoxLayout(tab)
+
         form = QFormLayout()
         self.ign_buzzer_edit = QLineEdit("port1/line1")
         form.addRow("Buzzer DO line", self.ign_buzzer_edit)
@@ -227,20 +230,33 @@ class MainWindow(QMainWindow):
         form.addRow("Igniter relay DO line", self.ign_relay_edit)
         self.ign_sense_edit = QLineEdit("ai2")
         form.addRow("Current-sense AI", self.ign_sense_edit)
+        self.ign_sense_term = QComboBox()
+        self.ign_sense_term.addItems(["RSE", "NRSE", "DIFF"])
+        form.addRow("Sense term config", self.ign_sense_term)
         self.ign_shunt_spin = self._spin(0.01, 10.0, 1.0, 0.1, " Ω")
         form.addRow("Shunt resistance", self.ign_shunt_spin)
+        self.ign_cont_spin = self._spin(0.0, 1000.0, 0.2, 0.1, " mA")
+        form.addRow("Continuity minimum", self.ign_cont_spin)
+        self.ign_leak_spin = self._spin(0.1, 1000.0, 5.0, 0.5, " mA")
+        form.addRow("Leak maximum", self.ign_leak_spin)
+        self.ign_confirm_spin = self._spin(1.0, 10000.0, 300.0, 50.0, " mA")
+        form.addRow("Fire-confirm minimum", self.ign_confirm_spin)
         self.ign_arm_spin = self._spin(1.0, 120.0, 15.0, 1.0, " s")
         form.addRow("Buzzer warning time", self.ign_arm_spin)
         self.ign_stab_spin = self._spin(0.0, 60.0, 1.0, 0.5, " s")
         form.addRow("Stabilize time", self.ign_stab_spin)
         self.ign_pulse_spin = self._spin(0.1, 10.0, 1.0, 0.1, " s")
         form.addRow("Relay pulse time", self.ign_pulse_spin)
-        lay.addLayout(form)
-        note = QLabel("Full ARM / FIRE safety controls are being finalized.\n"
-                      "Until then, run ignition tests with the command line.")
-        note.setWordWrap(True)
-        lay.addWidget(note)
-        lay.addStretch(1)
+        settings = QWidget()
+        settings.setLayout(form)
+        lay.addWidget(settings, 1)
+
+        from ni_usb6009_logger.gui.widgets.ignition_panel import IgnitionPanel
+        self.ign_panel = IgnitionPanel()
+        self.ign_panel.arm_confirmed.connect(self._start_ignition)
+        self.ign_panel.fire_permission_requested.connect(self._grant_fire)
+        self.ign_panel.abort_requested.connect(self._stop_session)
+        lay.addWidget(self.ign_panel, 1)
         return tab
 
     def _build_recovery_tab(self) -> QWidget:
@@ -344,6 +360,8 @@ class MainWindow(QMainWindow):
         self.calib_start.setEnabled(self._device_present and not busy)
         self.stop_btn.setEnabled(busy)
         self.calib_stop.setEnabled(busy)
+        self.ign_panel.interactive = self.interactive
+        self.ign_panel.arm_btn.setEnabled(self._device_present and has_file and not busy)
         if not has_file and not busy:
             self.log_message.setText("Pick an output file, then press Start.")
 
@@ -369,6 +387,7 @@ class MainWindow(QMainWindow):
         w.calib_header.connect(lambda cols: self.log_output.appendPlainText(" | ".join(cols)))
         w.calib_row.connect(self._on_calib_row)
         w.progress_info.connect(self._on_progress)
+        w.arming.connect(self._on_arming)
         w.error_text.connect(self._on_worker_error)
         w.finished_result.connect(self._on_finished)
         return w
@@ -387,6 +406,39 @@ class MainWindow(QMainWindow):
         from ni_usb6009_logger.core.session import LoggingSession
         self.calib_readout.setText("—")
         self._launch("log", lambda reporter: LoggingSession(cfg, reporter))
+
+    def _start_ignition(self):
+        """ARM was confirmed in the panel: launch the ignition logging run."""
+        from pathlib import Path
+        try:
+            cfg = self._panel_config(
+                outfile=Path(self.outfile_edit.text()),
+                require_explicit_output=True,
+                recovery=True,
+                ignition=IgnitionConfig(
+                    buzzer_line=self.ign_buzzer_edit.text().strip(),
+                    igniter_line=self.ign_relay_edit.text().strip(),
+                    arm_seconds=self.ign_arm_spin.value(),
+                    stabilize_seconds=self.ign_stab_spin.value(),
+                    pulse_seconds=self.ign_pulse_spin.value(),
+                    sense_ai=self.ign_sense_edit.text().strip() or None,
+                    shunt_ohms=self.ign_shunt_spin.value(),
+                    continuity_min_ma=self.ign_cont_spin.value(),
+                    leak_max_ma=self.ign_leak_spin.value(),
+                    fire_confirm_ma=self.ign_confirm_spin.value(),
+                    sense_term=self.ign_sense_term.currentText(),
+                ),
+            )
+        except ConfigError as e:
+            QMessageBox.warning(self, "Cannot arm", str(e))
+            self.ign_panel.reset()
+            return
+        from ni_usb6009_logger.core.session import LoggingSession
+        self._launch("ignite", lambda reporter: LoggingSession(cfg, reporter))
+
+    def _grant_fire(self):
+        if self.worker is not None:
+            self.worker.request_fire()
 
     def _start_calibration(self):
         cfg = self._panel_config(
@@ -433,16 +485,23 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.log_plot.stop()
         self.calib_plot.stop()
+        self.ign_panel.reset()
         self._update_start_enabled()
 
     # ------------------------------------------------------------- events
     def _on_state(self, state, detail):
+        if self._session_kind == "ignite":
+            self.ign_panel.set_session_state(state)
         if state == SessionState.DONE:
             self.statusBar().showMessage("Done")
         elif state == SessionState.ABORTED:
             self.statusBar().showMessage("Stopped")
         elif state == SessionState.INHIBITED:
             self.statusBar().showMessage("Ignition inhibited by safety failsafe")
+
+    def _on_arming(self, remaining, current_ma):
+        if self._session_kind == "ignite":
+            self.ign_panel.set_arming(remaining, current_ma)
 
     def _on_progress(self, samples, ch_count, elapsed, inst_rate):
         self.statusBar().showMessage(
@@ -477,6 +536,7 @@ class MainWindow(QMainWindow):
         if result.recovery_path:
             lines.append(f"Recovery copy: {result.recovery_path}")
         if result.state == SessionState.INHIBITED:
+            self.statusBar().showMessage("Ignition inhibited by safety failsafe")
             if self.interactive:
                 QMessageBox.warning(self, "Ignition inhibited",
                                     "A safety failsafe blocked the ignition.\n"
