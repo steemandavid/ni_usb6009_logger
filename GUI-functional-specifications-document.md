@@ -81,7 +81,16 @@ console output are unchanged.
 
 ### 3.3 Development mode
 `NI_USB6009_FAKE=1` substitutes the in-memory fake DAQ; the entire GUI operates
-normally (offscreen rendering with `QT_QPA_PLATFORM=offscreen` for CI).
+normally (offscreen rendering with `QT_QPA_PLATFORM=offscreen` for CI). The fake
+ignores terminal config and rate limits, so it cannot reproduce anything the
+driver validates.
+
+An **NI-DAQmx simulated device** (NI MAX -> Devices and Interfaces -> Create New
+-> NI-DAQmx Simulated Device -> USB-6009) needs no env var and exercises the real
+driver: real enumeration, real error codes, real terminal-config and rate
+validation. AI returns a driver-generated sine and DO writes go nowhere physical,
+so ignition still needs the bench. Use it to verify anything that talks to the
+driver -- it is the only regression guard for §5 and §12 outside hardware.
 
 ---
 
@@ -105,7 +114,9 @@ normally (offscreen rendering with `QT_QPA_PLATFORM=offscreen` for CI).
 
 - **Config panel** (applies to all modes): device combo (auto-detected, editable),
   AI channels (comma list, e.g. `ai0,ai1`), DI lines (spec syntax `port0/line0:7` or
-  comma list), sample rate (1–48 000 Hz), chunk size, terminal config (RSE/NRSE/DIFF),
+  comma list), sample rate (1–48 000 Hz aggregate across all AI channels, see §12),
+  chunk size, terminal config (RSE/NRSE/DIFF — NRSE is listed but unsupported by the
+  device and rejected at Start; see §17 item 4),
   AI voltage range, duration (0 = run until Stop).
 - **Output file box** sits above the tabs and is shared by Log and Ignite.
 - All settings persist across launches (§11) and are restored on start.
@@ -257,6 +268,9 @@ Rules:
 | No output file chosen | Start/ARM simply disabled; hint text in the tab |
 | Unwritable output path | Error dialog with the underlying message |
 | Ignition setup failure (DO task) | Error dialog (historic CLI exit code 3 equivalent) |
+| Rate x channels over 48 kS/s | Rejected before the task is created; message names the per-channel maximum |
+| `--term DIFF` on ai4-ai7, or NRSE | Rejected before the task is created; message names the usable channels/modes |
+| Any other configuration the driver refuses | `DAQ driver error:` plus NI's own text, which names the property and its permitted range |
 | Any unexpected exception | Top-level handler: friendly dialog; details to stderr/log output |
 
 ---
@@ -283,7 +297,7 @@ Used by the installer's post-install verification (§3.1).
 
 ## 15. Verification traceability
 
-| Spec section | Automated tests (30 total) |
+| Spec section | Automated tests (54 total) |
 |---|---|
 | CLI parity (unchanged behavior) | `test_cli_parity.py` (golden `--help`, flag mapping, exit codes) |
 | Logging data / auto-naming | `test_sessions_fake_daq.py` |
@@ -294,8 +308,21 @@ Used by the installer's post-install verification (§3.1).
 | Ring-buffer bounds | `test_gui_smoke.py` |
 | Ignition GUI state machine | `test_gui_smoke.py` (full flow, leak inhibit, abort) |
 
+| USB-6009 rate/terminal-config limits | `test_core_sessions.py` (confirmed against a simulated device first) |
+| Read-timeout scaling | `test_core_sessions.py` |
+
 CI runs the suite on every push (ubuntu; GUI tests offscreen) and builds the Windows
 installer on `v*` tags (`.github/workflows/`).
+
+**CI cannot catch driver-facing regressions.** Both jobs run on ubuntu with no
+NI-DAQmx driver, and the fake backend is by design a faithful stand-in rather than
+an authority: it cannot reject a bad terminal config, exceed a rate ceiling, or
+reproduce Windows' cp1252 console encoding. The checks in §3.3 against a simulated
+device are the only guard for those.
+
+Note for GUI tests: Qt routes an exception raised inside a slot to `sys.excepthook`
+instead of propagating it, so a crash that closes the real app can leave a passing
+test behind. The `qapp` fixture records hook calls and fails the test.
 
 ## 16. Relationship to the CLI
 
@@ -313,3 +340,10 @@ installer on `v*` tags (`.github/workflows/`).
    relay/buzzer ignition dry run **without an igniter** before first live use.
 3. Set the repo variable `NIDAQMX_URL` to bundle the driver component in CI builds,
    then tag `v1.2.0` to produce the first release installer.
+4. Remove **NRSE** from the terminal-config combos (`main_window.py:117` and `:242`)
+   and from §4. The USB-6009 has no NRSE mode -- `ai_term_cfgs` lists only RSE
+   and DIFF on every channel -- so choosing it now fails at Start with a clear
+   message, but offering a choice that can never work is worse than not offering it.
+5. Walk the remaining tabs against a simulated device. The Calibrate-tab crash found
+   in this session (session returning `None` into `_on_finished`) was invisible to a
+   test that covered the exact flow; other tabs may hide the same class of defect.
