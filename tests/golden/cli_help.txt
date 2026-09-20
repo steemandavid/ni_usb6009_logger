@@ -1,0 +1,90 @@
+usage: ni_usb6009_logger [-h] [--device DEVICE] --channels CHANNELS
+                         [--digital DIGITAL] [--rate RATE] [--chunk CHUNK]
+                         [--vmin VMIN] [--vmax VMAX] [--term {RSE,NRSE,DIFF}]
+                         [--outfile OUTFILE] [--format {csv,xlsx}]
+                         [--duration DURATION]
+                         [--progress {auto,none,counter,bar}]
+                         [--update-interval UPDATE_INTERVAL]
+                         [--print-first PRINT_FIRST] [--debug] [--calibrate]
+                         [--calib-window CALIB_WINDOW] [--calib-show-raw]
+                         [--calib-sample-rate CALIB_SAMPLE_RATE] [--ignite]
+                         [--buzzer-line BUZZER_LINE]
+                         [--igniter-line IGNITER_LINE]
+                         [--arm-seconds ARM_SECONDS]
+                         [--stabilize-seconds STABILIZE_SECONDS]
+                         [--pulse-seconds PULSE_SECONDS]
+                         [--igniter-sense-ai IGNITER_SENSE_AI]
+                         [--shunt-ohms SHUNT_OHMS]
+                         [--continuity-min-ma CONTINUITY_MIN_MA]
+                         [--leak-max-ma LEAK_MAX_MA]
+                         [--fire-confirm-ma FIRE_CONFIRM_MA]
+                         [--sense-rate SENSE_RATE]
+                         [--sense-term {RSE,NRSE,DIFF}]
+
+Log NI USB-6009 analog inputs (AI) and optional digital inputs (DI) to CSV or XLSX.
+AI is hardware-timed; DI on USB-6009 is static (snapshotted once per AI chunk).
+Calibration mode prints live values to the screen (no file) with optional moving-average filtering.
+Ignition mode (logging only) actuates a buzzer pre-warning, then fires a relay after stabilization.
+
+options:
+  -h, --help            show this help message and exit
+  --device DEVICE       NI-DAQmx device name/alias as shown in NI MAX (e.g., Dev1). (default: Dev1)
+  --channels CHANNELS   Comma-separated AI channels relative to device, e.g. 'ai0' or 'ai0,ai1'. At least one AI is required (USB-6009 AI provides the hardware timing). (default: None)
+  --digital DIGITAL     Optional DI lines relative to device. Accepts comma list and ranges, e.g. 'port0/line0:7' or 'port0/line0,port0/line3'. DI is snapshotted once per chunk. (default: )
+  --rate RATE           Analog output/print rate in Hz. Default is 1000 for logging, or 1 for --calibrate if not specified. (default: None)
+  --chunk CHUNK         Samples per read per AI channel (logging mode). Also sets DI snapshot cadence (once per chunk). (default: 1000)
+  --vmin VMIN           Minimum expected AI voltage (V). (default: -10.0)
+  --vmax VMAX           Maximum expected AI voltage (V). (default: 10.0)
+  --term {RSE,NRSE,DIFF}
+                        AI terminal configuration. (default: RSE)
+  --outfile OUTFILE     Output file path. If omitted, auto-named under .\logs as ni_<device>_<YYYYmmdd_HHMMSS>.<csv|xlsx>. Existing files are never overwritten: a suffix _1, _2, ... is appended. (default: )
+  --format {csv,xlsx}   Output format. If omitted, inferred from --outfile extension, else CSV. (default: None)
+  --duration DURATION   Seconds to run. Omit to run until Ctrl+C. (default: None)
+  --progress {auto,none,counter,bar}
+                        Progress display mode. 'auto' = bar if --duration set, else counter. (default: auto)
+  --update-interval UPDATE_INTERVAL
+                        Seconds between progress updates. (default: 0.5)
+  --print-first PRINT_FIRST
+                        Print the first N logged rows to console. (default: 0)
+  --debug               Print extra debug info during setup and runtime. (default: False)
+  --calibrate           Calibration mode: screen-only live readout (no file). Output prints at --rate (default 1 Hz). (default: False)
+  --calib-window CALIB_WINDOW
+                        Moving-average window in seconds for calibration display (set 0 to disable). (default: 5.0)
+  --calib-show-raw      Also print raw instantaneous values (in addition to the moving average). (default: False)
+  --calib-sample-rate CALIB_SAMPLE_RATE
+                        Internal hardware sampling rate in calibration mode (Hz). Feeds moving average. (default: 100.0)
+  --ignite              Enable ignition sequence (logging mode only): buzzer pre-warning, then relay pulse after logging stabilizes. (default: False)
+  --buzzer-line BUZZER_LINE
+                        Digital OUTPUT line for buzzer (e.g. 'port0/line1'). Required with --ignite. (default: None)
+  --igniter-line IGNITER_LINE
+                        Digital OUTPUT line for igniter relay (e.g. 'port0/line0'). Required with --ignite. (default: None)
+  --arm-seconds ARM_SECONDS
+                        Seconds to sound buzzer before logging starts. (default: 15.0)
+  --stabilize-seconds STABILIZE_SECONDS
+                        Seconds after logging starts before firing igniter. (default: 1.0)
+  --pulse-seconds PULSE_SECONDS
+                        Duration of igniter relay ON time. (default: 1.0)
+  --igniter-sense-ai IGNITER_SENSE_AI
+                        AI channel used to measure shunt voltage for igniter current (e.g. 'ai2'). (default: None)
+  --shunt-ohms SHUNT_OHMS
+                        Series shunt resistance in ohms. (default: 1.0)
+  --continuity-min-ma CONTINUITY_MIN_MA
+                        Minimum current (mA) that indicates igniter continuity present (pre-arm check). (default: 0.2)
+  --leak-max-ma LEAK_MAX_MA
+                        Maximum allowed current (mA) BEFORE ignition; above this inhibits arming/firing. (default: 5.0)
+  --fire-confirm-ma FIRE_CONFIRM_MA
+                        Minimum current (mA) that should be observed DURING pulse to confirm ignition. (default: 300.0)
+  --sense-rate SENSE_RATE
+                        Sampling rate (Hz) for current-sense AI during arming/pulse confirm. (default: 100.0)
+  --sense-term {RSE,NRSE,DIFF}
+                        Terminal configuration for the igniter sense AI channel. (default: DIFF)
+
+Digital lines syntax examples:
+  --digital port0/line0:7         # all 8 lines on port0
+  --digital port0/line0,port0/line3
+
+Tips:
+  • Lower --chunk to snapshot DI more often (e.g., --chunk 100 at 1 kHz ≈ 10 DI snaps/sec)
+  • Omit --outfile to auto-save under .\logs with timestamped filename (no-overwrite).
+  • Use --calibrate for screen-only, filtered readout (internal --calib-sample-rate, prints at --rate).
+  • Use --ignite with explicit DO lines for buzzer and relay.
