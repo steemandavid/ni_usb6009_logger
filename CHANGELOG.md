@@ -288,6 +288,23 @@ All findings from `Code_Review_Full_20260920_1354.md` (4 critical, 11 major,
   left as a decision for the operator before first live use.
 - Phase 6 hardware verification per `packaging/README.md` is still pending.
 
+### Follow-ups
+1. **`installer.iss` has still never been compiled.** The Pascal precedence and
+   preprocessor fixes were made on Linux; ISCC has never successfully run this
+   script, and the Windows session above exercised the driver stack but not the
+   installer build. Verify with
+   `iscc /DAppVersion=0.0.0 /DSourceDir=..\dist\NI6009Logger packaging\installer.iss`
+   on Windows, or a throwaway tag, **before** the hardware session.
+2. Hardware checks specific to this session's changes: fire-confirm with the sense
+   channel included in `--channels`; relay ON time on a scope at GUI defaults
+   (1 kHz / 1000-sample chunks, 0.2 s pulse); whether the driver really refuses the
+   fallback second AI task (the assumption `_fake_nidaqmx.py` now models).
+3. Bump `__version__` to 1.2.0 and tag — `pyproject.toml` derives the version from
+   `__init__.py`, so that is the only edit.
+4. README "10. My current test command" passes `--calibrate` *and* `--ignite`, which
+   `validate()` rejects with exit code 2. Pre-existing; the command as written does
+   not run.
+
 ---
 
 ## 2026-09-20 — GUI application + shared core (v1.1.x development)
