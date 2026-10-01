@@ -35,10 +35,12 @@ from PySide6.QtWidgets import (
 import ni_usb6009_logger
 from ni_usb6009_logger.core import daq
 from ni_usb6009_logger.core.config import (
+    AI_SUPPORTED_TERMS,
     CalibrationConfig,
     ConfigError,
     IgnitionConfig,
     LoggerConfig,
+    validate,
 )
 from ni_usb6009_logger.core.events import SessionState
 from ni_usb6009_logger.core.calibration import calibration_chunk
@@ -48,6 +50,23 @@ from ni_usb6009_logger.gui.widgets.device_picker import DevicePicker
 from ni_usb6009_logger.gui.worker import SessionWorker
 
 DEVICE_POLL_MS = 2000
+
+# core.config words its messages for the CLI; name the GUI's fields instead.
+_CLI_TO_GUI = (
+    ("--sense-term", "Sense term config"),
+    ("--term", "Term config"),
+    ("--rate", "the sample rate"),
+    ("--buzzer-line", "Buzzer DO line"),
+    ("--igniter-line", "Igniter relay DO line"),
+    ("--ignite", "Ignition"),
+)
+
+
+def _gui_message(error: ConfigError) -> str:
+    text = str(error).removeprefix("Error: ")
+    for flag, name in _CLI_TO_GUI:
+        text = text.replace(flag, name)
+    return text[:1].upper() + text[1:]
 
 
 class MainWindow(QMainWindow):
@@ -72,6 +91,7 @@ class MainWindow(QMainWindow):
         self._device_timer.timeout.connect(self._poll_devices)
         self._device_timer.start()
         self.device_picker.rescan()
+        self._refresh_recovery()
 
     # ------------------------------------------------------------------- UI
     def _build_ui(self):
@@ -114,7 +134,7 @@ class MainWindow(QMainWindow):
         form.addRow("Chunk size", self.chunk_spin)
 
         self.term_combo = QComboBox()
-        self.term_combo.addItems(["RSE", "NRSE", "DIFF"])
+        self.term_combo.addItems(AI_SUPPORTED_TERMS)
         form.addRow("Term config", self.term_combo)
 
         range_box = QHBoxLayout()
@@ -137,7 +157,10 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_log_tab(), "Log")
         tabs.addTab(self._build_calibrate_tab(), "Calibrate")
         tabs.addTab(self._build_ignite_tab(), "Ignite")
-        tabs.addTab(self._build_recovery_tab(), "Recovery")
+        self._recovery_tab = self._build_recovery_tab()
+        tabs.addTab(self._recovery_tab, "Recovery")
+        tabs.currentChanged.connect(
+            lambda i: tabs.widget(i) is self._recovery_tab and self._refresh_recovery())
         self.tabs = tabs
 
         holder = QWidget()
@@ -239,7 +262,7 @@ class MainWindow(QMainWindow):
         self.ign_sense_edit = QLineEdit("ai2")
         form.addRow("Current-sense AI", self.ign_sense_edit)
         self.ign_sense_term = QComboBox()
-        self.ign_sense_term.addItems(["RSE", "NRSE", "DIFF"])
+        self.ign_sense_term.addItems(AI_SUPPORTED_TERMS)
         form.addRow("Sense term config", self.ign_sense_term)
         self.ign_shunt_spin = self._spin(0.01, 10.0, 1.0, 0.1, " Ω")
         form.addRow("Shunt resistance", self.ign_shunt_spin)
@@ -305,7 +328,7 @@ class MainWindow(QMainWindow):
         self.digital_edit.setText(",".join(c.digital_lines))
         self.rate_spin.setValue(c.rate)
         self.chunk_spin.setValue(c.chunk)
-        self.term_combo.setCurrentText(c.term)
+        self._restore_term(self.term_combo, c.term, "Term config")
         self.vmin_spin.setValue(c.vmin)
         self.vmax_spin.setValue(c.vmax)
         self.duration_spin.setValue(c.duration if c.duration else 0.0)
@@ -319,7 +342,8 @@ class MainWindow(QMainWindow):
             self.ign_buzzer_edit.setText(c.ignition.buzzer_line)
             self.ign_relay_edit.setText(c.ignition.igniter_line)
             self.ign_sense_edit.setText(c.ignition.sense_ai or "")
-            self.ign_sense_term.setCurrentText(c.ignition.sense_term)
+            self._restore_term(self.ign_sense_term, c.ignition.sense_term,
+                               "Sense term config")
             self.ign_shunt_spin.setValue(c.ignition.shunt_ohms)
             self.ign_cont_spin.setValue(c.ignition.continuity_min_ma)
             self.ign_leak_spin.setValue(c.ignition.leak_max_ma)
@@ -327,6 +351,19 @@ class MainWindow(QMainWindow):
             self.ign_arm_spin.setValue(c.ignition.arm_seconds)
             self.ign_stab_spin.setValue(c.ignition.stabilize_seconds)
             self.ign_pulse_spin.setValue(c.ignition.pulse_seconds)
+
+    def _restore_term(self, combo, term, label):
+        # Settings saved before NRSE was dropped (the USB-6009 has no NRSE
+        # mode) would otherwise leave the combo silently on its first item.
+        if combo.findText(term) >= 0:
+            combo.setCurrentText(term)
+            return
+        # The log pane, not the status bar: device detection overwrites the
+        # status bar a moment after the window opens.
+        self.log_output.appendPlainText(
+            f"Note: saved {label} {term} is not supported by the USB-6009 and "
+            f"was reset to {combo.currentText()}. Check it matches the wiring "
+            f"before starting.")
 
     def _ignition_from_panel(self) -> IgnitionConfig:
         return IgnitionConfig(
@@ -367,6 +404,9 @@ class MainWindow(QMainWindow):
         )
         self.cfg = cfg
         self._save_panel_settings()
+        # The sessions validate too, but a ConfigError raised in the worker
+        # reaches the user as "something went wrong during the test".
+        validate(cfg)
         return cfg
 
     def _save_panel_settings(self):
@@ -464,7 +504,7 @@ class MainWindow(QMainWindow):
                 recovery=True,
             )
         except ConfigError as e:
-            QMessageBox.warning(self, "Cannot start", str(e))
+            QMessageBox.warning(self, "Cannot start", _gui_message(e))
             return
         from ni_usb6009_logger.core.session import LoggingSession
         self.calib_readout.setText("—")
@@ -480,7 +520,7 @@ class MainWindow(QMainWindow):
                 ignition=self._ignition_from_panel(),
             )
         except ConfigError as e:
-            QMessageBox.warning(self, "Cannot arm", str(e))
+            QMessageBox.warning(self, "Cannot arm", _gui_message(e))
             self.ign_panel.reset()
             return
         # The LEDs must reflect the thresholds the core will enforce.
@@ -497,7 +537,7 @@ class MainWindow(QMainWindow):
         try:
             cfg = self._panel_config(calibration=self._calibration_from_panel())
         except ConfigError as e:
-            QMessageBox.warning(self, "Cannot start", str(e))
+            QMessageBox.warning(self, "Cannot start", _gui_message(e))
             return
         from ni_usb6009_logger.core.calibration import CalibrationSession
         self.calib_readout.setText("—")
@@ -538,6 +578,9 @@ class MainWindow(QMainWindow):
         self.calib_plot.stop()
         self.ign_panel.reset()
         self._update_start_enabled()
+        # Every ending, including an unplug or error: an interrupted run is the
+        # recovery copy the operator most needs to see.
+        self._refresh_recovery()
 
     # ------------------------------------------------------------- events
     def _on_state(self, state, detail):
@@ -585,7 +628,6 @@ class MainWindow(QMainWindow):
             # A session that returns nothing is a bug in that session, but it
             # must not reach _excepthook and close the app on the user.
             self.statusBar().showMessage("Finished")
-            self._refresh_recovery()
             return
         lines = []
         if result.output_path:
@@ -611,7 +653,6 @@ class MainWindow(QMainWindow):
                     QDesktopServices.openUrl(QUrl.fromLocalFile(str(result.output_path.parent)))
             else:
                 self.log_output.appendPlainText(summary)
-        self._refresh_recovery()
 
     # ------------------------------------------------------------ recovery
     def _recovery_dirs(self):
@@ -660,7 +701,13 @@ class MainWindow(QMainWindow):
                                               "CSV files (*.csv)")
         if dest:
             import shutil
-            shutil.copy2(src, dest)
+            try:
+                shutil.copy2(src, dest)
+            except OSError as e:
+                # Raised in a slot this would reach _excepthook and close the app.
+                QMessageBox.warning(self, "Copy failed",
+                                    f"The recovery file could not be copied:\n\n{e}")
+                return
             self.statusBar().showMessage(f"Copied to {dest}")
 
     # --------------------------------------------------------------- close

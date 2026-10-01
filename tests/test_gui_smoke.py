@@ -284,7 +284,7 @@ def test_settings_round_trip_keeps_ignition_thresholds(qapp, fake_daq, tmp_path)
     win.ign_cont_spin.setValue(0.5)
     win.ign_leak_spin.setValue(50.0)
     win.ign_confirm_spin.setValue(750.0)
-    win.ign_sense_term.setCurrentText("NRSE")
+    win.ign_sense_term.setCurrentText("DIFF")
     win.calib_window_spin.setValue(9.0)
     # A plain log run must not drop the ignition parameters when it saves.
     win._start_logging()
@@ -296,15 +296,38 @@ def test_settings_round_trip_keeps_ignition_thresholds(qapp, fake_daq, tmp_path)
     assert cfg.ignition.continuity_min_ma == 0.5
     assert cfg.ignition.leak_max_ma == 50.0
     assert cfg.ignition.fire_confirm_ma == 750.0
-    assert cfg.ignition.sense_term == "NRSE"
+    assert cfg.ignition.sense_term == "DIFF"
     assert cfg.calibration.window_seconds == 9.0
 
     win2 = MainWindowFactory(qapp, fake_daq)
     assert win2.ign_cont_spin.value() == 0.5
     assert win2.ign_leak_spin.value() == 50.0
     assert win2.ign_confirm_spin.value() == 750.0
-    assert win2.ign_sense_term.currentText() == "NRSE"
+    assert win2.ign_sense_term.currentText() == "DIFF"
     win2.close()
+
+
+def test_term_combos_offer_only_supported_modes(qapp, fake_daq, tmp_path):
+    # The USB-6009 has no NRSE mode; offering it only fails at Start.
+    win = _make_window(qapp, fake_daq, tmp_path)
+    for combo in (win.term_combo, win.ign_sense_term):
+        items = [combo.itemText(i) for i in range(combo.count())]
+        assert items == ["RSE", "DIFF"]
+    win.close()
+
+
+def test_saved_nrse_falls_back_with_a_notice(qapp, fake_daq, tmp_path):
+    from dataclasses import replace
+    from ni_usb6009_logger.gui import settings as gsettings
+    from ni_usb6009_logger.core.config import IgnitionConfig
+    # Settings written by a version that still offered NRSE.
+    gsettings.save_config(replace(gsettings.default_config(), term="NRSE",
+                                  ignition=IgnitionConfig(sense_term="NRSE")))
+    win = MainWindowFactory(qapp, fake_daq)
+    assert win.term_combo.currentText() == "RSE"
+    assert win.ign_sense_term.currentText() == "RSE"
+    assert "NRSE is not supported" in win.log_output.toPlainText()
+    win.close()
 
 
 def MainWindowFactory(qapp, fake_daq):
@@ -346,4 +369,73 @@ def test_typed_device_name_enables_start(qapp, fake_daq, tmp_path):
     assert not win.log_start.isEnabled()
     win.device_picker.combo.setEditText("Dev7")  # not visible to enumeration
     assert win.log_start.isEnabled(), "a typed device must be usable (FSD §5)"
+    win.close()
+
+
+def test_settings_stay_out_of_the_real_profile(qapp):
+    # QSettings(org, app) ignores setDefaultFormat(): on Windows every test
+    # wrote the registry, overwrote the operator's saved settings and leaked
+    # state between tests. Linux CI could not notice (native format is INI).
+    from ni_usb6009_logger.gui import settings as gsettings
+    assert gsettings._settings().fileName().endswith(".ini")
+
+
+def test_config_error_is_refused_before_the_run(qapp, fake_daq, tmp_path, monkeypatch):
+    # Validated in the worker, a bad setting read as "Something went wrong
+    # during the test ... data recorded so far is safe", in CLI flag names.
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        staticmethod(lambda _p, title, text: shown.append((title, text))))
+    win = _make_window(qapp, fake_daq, tmp_path)
+    win.channels_edit.setText("ai5")
+    win.term_combo.setCurrentText("DIFF")
+    win._start_logging()
+    assert win.worker is None, "no session is started for an invalid config"
+    title, text = shown[-1]
+    assert title == "Cannot start"
+    assert "Term config" in text and "--term" not in text
+    assert not text.startswith("Error:")
+    win.close()
+
+
+def test_recovery_tab_shows_interrupted_runs(qapp, fake_daq, tmp_path):
+    # Listed at launch, and refreshed after an unplug -- not only after a
+    # clean finish, which was the one case that did not need it.
+    (tmp_path / "recovery").mkdir()
+    (tmp_path / "recovery" / "old_recovery.csv").write_text("t,ai0\n")
+    from dataclasses import replace
+    from ni_usb6009_logger.gui import settings as gsettings
+    gsettings.save_config(replace(gsettings.default_config(),
+                                  outfile=tmp_path / "run.csv"))
+    win = _make_window(qapp, fake_daq, tmp_path)
+    assert win.recovery_list.count() == 1, "existing recovery files listed at launch"
+
+    win.duration_spin.setValue(0.0)
+    win._start_logging()
+    deadline = time.time() + 5
+    while "Running" not in win.log_output.toPlainText() and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.02)
+    fake_daq.reset(devices=[])
+    _wait_worker_done(qapp, win)
+    names = [win.recovery_list.item(i).text() for i in range(win.recovery_list.count())]
+    assert any("run_recovery.csv" in n and "INTERRUPTED" in n for n in names), names
+    win.close()
+
+
+def test_copy_recovery_failure_does_not_crash(qapp, fake_daq, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+    (tmp_path / "recovery").mkdir()
+    (tmp_path / "recovery" / "old_recovery.csv").write_text("t,ai0\n")
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        staticmethod(lambda _p, title, text: shown.append(title)))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(
+        lambda *a, **k: (str(tmp_path / "no_such_dir" / "c.csv"), "")))
+    win = _make_window(qapp, fake_daq, tmp_path)
+    win.tabs.setCurrentWidget(win._recovery_tab)  # opening the tab refreshes it
+    win.recovery_list.setCurrentRow(0)
+    win._copy_recovery()  # raised FileNotFoundError, which closes the real app
+    assert shown == ["Copy failed"]
     win.close()

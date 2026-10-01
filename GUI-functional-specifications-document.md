@@ -115,8 +115,8 @@ driver -- it is the only regression guard for §5 and §12 outside hardware.
 - **Config panel** (applies to all modes): device combo (auto-detected, editable),
   AI channels (comma list, e.g. `ai0,ai1`), DI lines (spec syntax `port0/line0:7` or
   comma list), sample rate (1–48 000 Hz aggregate across all AI channels, see §12),
-  chunk size, terminal config (RSE/NRSE/DIFF — NRSE is listed but unsupported by the
-  device and rejected at Start; see §17 item 4),
+  chunk size, terminal config (RSE/DIFF — the USB-6009 has no NRSE mode; a value saved
+  by an older version falls back to RSE with a note in the log pane),
   AI voltage range, duration (0 = run until Stop).
 - **Output file box** sits above the tabs and is shared by Log and Ignite.
 - All settings persist across launches (§11) and are restored on start.
@@ -241,7 +241,7 @@ Rules:
 | Format | Recovery is **always CSV flushed every chunk** (XLSX only reaches disk at close, so it cannot serve as the crash copy) |
 | Clean finish | Recovery file renamed `…_recovery_OK.csv` |
 | Interrupted run (crash, unplug, abort) | Recovery file remains without the `_OK` marker — partial data preserved on both sinks (writers close in a `finally`) |
-| Recovery tab | Lists all recovery files (newest first) with OK/INTERRUPTED status and size, from the current output file's `recovery/` folder **and** the default logs folder; **Copy to…** restores any file to a user-chosen location |
+| Recovery tab | Lists all recovery files (newest first) with OK/INTERRUPTED status and size, from the current output file's `recovery/` folder **and** the default logs folder. Refreshed at launch, when the tab is opened, and after **every** run ending (including an unplug or error). **Copy to…** restores any file to a user-chosen location; a failed copy is reported in a dialog |
 
 ---
 
@@ -269,7 +269,9 @@ Rules:
 | Unwritable output path | Error dialog with the underlying message |
 | Ignition setup failure (DO task) | Error dialog (historic CLI exit code 3 equivalent) |
 | Rate x channels over 48 kS/s | Rejected before the task is created; message names the per-channel maximum |
-| `--term DIFF` on ai4-ai7, or NRSE | Rejected before the task is created; message names the usable channels/modes |
+| DIFF on ai4-ai7 (Term config or Sense term config) | Rejected before the task is created; message names the usable channels |
+| Any invalid setting (range, rate, empty channel list, missing DO lines) | "Cannot start" / "Cannot arm" dialog **before** a session starts, naming the GUI field — never the mid-test "something went wrong" dialog |
+| Recovery **Copy to…** fails | "Copy failed" dialog with the OS message |
 | Any other configuration the driver refuses | `DAQ driver error:` plus NI's own text, which names the property and its permitted range |
 | Any unexpected exception | Top-level handler: friendly dialog; details to stderr/log output |
 
@@ -340,10 +342,8 @@ test behind. The `qapp` fixture records hook calls and fails the test.
    relay/buzzer ignition dry run **without an igniter** before first live use.
 3. Set the repo variable `NIDAQMX_URL` to bundle the driver component in CI builds,
    then tag `v1.2.0` to produce the first release installer.
-4. Remove **NRSE** from the terminal-config combos (`main_window.py:117` and `:242`)
-   and from §4. The USB-6009 has no NRSE mode -- `ai_term_cfgs` lists only RSE
-   and DIFF on every channel -- so choosing it now fails at Start with a clear
-   message, but offering a choice that can never work is worse than not offering it.
-5. Walk the remaining tabs against a simulated device. The Calibrate-tab crash found
-   in this session (session returning `None` into `_on_finished`) was invisible to a
-   test that covered the exact flow; other tabs may hide the same class of defect.
+4. Walk the tabs against the NI **simulated** device (real driver stack). Done on the
+   fake backend 2026-10-01; the simulated-device pass is blocked until the NI
+   Configuration Manager service (`mxssvr`) runs on the dev machine.
+5. When the NI configuration service is stopped, device enumeration fails and the GUI
+   shows "No DAQ detected — waiting for device…" instead of naming the cause.

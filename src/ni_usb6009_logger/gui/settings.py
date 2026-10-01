@@ -51,12 +51,19 @@ def _from_dict(d: dict) -> LoggerConfig:
     return cfg
 
 
+def _settings() -> QSettings:
+    # QSettings(org, app) always uses NativeFormat -- the registry on Windows --
+    # and ignores setDefaultFormat(). Naming the format explicitly keeps the
+    # registry in production while letting tests redirect to a temp INI file.
+    return QSettings(QSettings.defaultFormat(), QSettings.UserScope, _ORG, _APP)
+
+
 def save_config(cfg: LoggerConfig) -> None:
-    QSettings(_ORG, _APP).setValue(_KEY, json.dumps(_to_json(cfg)))
+    _settings().setValue(_KEY, json.dumps(_to_json(cfg)))
 
 
 def load_config() -> LoggerConfig:
-    raw = QSettings(_ORG, _APP).value(_KEY, "")
+    raw = _settings().value(_KEY, "")
     if not raw:
         return default_config()
     try:
