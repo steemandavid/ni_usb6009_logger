@@ -1,5 +1,93 @@
 # Changelog
 
+## 2026-10-01 — NRSE removed from the GUI; tab walk fixes
+
+Closes FSD §17 items 4 (NRSE) and, on the fake backend, 5 (walk the remaining tabs).
+Test suite 54 → 60; `flake8` clean. Every new test was confirmed to **fail against
+the previous code**.
+
+### Changed — NRSE no longer offered
+
+- Both terminal-config combos (Term config, Sense term config) are filled from
+  `core.config.AI_SUPPORTED_TERMS` (RSE, DIFF), so GUI and validation cannot drift.
+- A settings blob saved by an older version with `NRSE` falls back to RSE, with a note
+  in the Log tab's output pane. (A status-bar message was tried first: device
+  detection overwrites it milliseconds after launch, so nobody would ever see it.)
+- The CLI keeps `--term NRSE` in its argparse choices deliberately (explains instead
+  of "invalid choice"); golden `--help` unchanged.
+
+### Fixed — GUI tests were writing the real Windows registry (critical for the dev box)
+
+`QSettings(org, app)` **always uses NativeFormat** — the registry on Windows — and
+ignores `QSettings.setDefaultFormat()`, which only applies to the other constructors.
+The `qapp` fixture's redirect to a temp INI therefore did nothing on Windows:
+
+- every GUI test overwrote the operator's real saved settings
+  (`HKCU\Software\steeman.be\NI USB-6009 Logger`), leaving pytest temp paths and
+  **empty buzzer/relay DO lines** behind;
+- state leaked between tests — the cause of `test_fire_stays_blocked_during_arming`
+  failing on unmodified code (it inherited empty DO lines, so the ignition run was
+  rejected by validation and ARMING was never reached).
+
+Linux CI cannot notice: there NativeFormat *is* an INI file. `gui/settings.py` now
+builds `QSettings(QSettings.defaultFormat(), UserScope, org, app)` — registry in
+production, temp INI under the fixture. `test_settings_stay_out_of_the_real_profile`
+guards it. The polluted registry key was deleted, so the GUI starts from defaults.
+
+### Fixed — defects found walking the tabs (fake backend)
+
+A scripted offscreen walk (unhandled slot exceptions recorded) covered: invalid
+configs, XLSX logging, mid-run unplug and replug, Recovery listing and Copy to…,
+ignition with no sense channel (ARM → FIRE → ABORT), DIFF on a single-ended sense
+channel, and closing the window during FIRE_PENDING.
+
+| Defect | Fix |
+|---|---|
+| Invalid settings (vmin ≥ vmax, DIFF on ai4–ai7, …) were validated only inside the worker and surfaced as *"Something went wrong during the test … data recorded so far is safe"*, with `ConfigError:` and CLI flag names (`--term`, `--sense-term`) | `_panel_config()` calls `validate()` up front → "Cannot start" / "Cannot arm" dialog; `_gui_message()` strips `Error: ` and maps flags to GUI field names |
+| Recovery tab empty at launch even with files on disk, and **not refreshed after an unplug/error** — the interrupted copy, the one that matters, was not listed | Refresh at launch, when the tab is opened, and in `_worker_gone` (every ending) |
+| **Copy to…** raised `FileNotFoundError` in a slot → `_excepthook` → app closed | `OSError` caught, "Copy failed" dialog |
+
+Verified OK during the walk: XLSX output, Start/ARM gating on unplug/replug (within
+one 2 s poll), ignition DO sequence (LOW first and last), window close mid-ignition
+(worker stopped, DO LOW, ~0.02 s on the fake).
+
+### Docs
+
+- FSD §4 (RSE/DIFF only), §10 (Recovery refresh + copy failure), §12 (pre-start
+  config errors, copy failure), §17 open items rewritten.
+- `packaging/README.md`: uninstall check pointed at `%LOCALAPPDATA%`; settings
+  actually live in the registry key above.
+
+### Commits
+
+| SHA | Subject |
+|---|---|
+| `ab5337f` | Drop NRSE from the GUI and fix defects found walking the tabs |
+
+### Notes / gotchas
+
+- **NI services stopped on this machine.** `mxssvr` (NI Configuration Manager) and
+  `nidevldu` (NI Device Loader) were *Stopped* despite *Automatic* start; nidaqmx
+  then raises `MAX: (Hex 0x8004032B) The configuration database is not running`,
+  and the simulated USB-6009 is invisible. Starting them needs admin:
+  `Start-Service mxssvr, nidevldu` (elevated) or reboot.
+- In that state `daq.enumerate_devices()` swallows the error and the GUI shows
+  *"No DAQ detected — waiting for device…"* — misleading; see follow-up 2.
+- The walk scripts must patch `QMessageBox.exec` too: `_update_start_enabled()`
+  copies `MainWindow.interactive` onto the ignition panel, and a real modal hangs an
+  offscreen run indefinitely.
+- `_make_window` sets the output file *after* construction, so anything the window
+  does at launch from the saved output path must be tested by seeding settings first.
+
+### Follow-ups
+
+1. Walk the tabs against the **NI simulated device** once the NI services run
+   (FSD §17 item 4).
+2. Distinguish "NI configuration service not running" from "no device" in
+   enumeration and say so in the GUI (FSD §17 item 5).
+3. Hardware-only items unchanged (ignition dry run, accuracy/noise, sustained
+   high rate, PyInstaller DLL hooks).
+
 ## 2026-09-20 — First run on Windows: driver, console and GUI fixes
 
 First time the project ran on the Windows machine that hosts the DAQ. Development

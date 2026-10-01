@@ -54,7 +54,7 @@ tab -- the Calibrate tab shipped a crash that the offscreen suite could not see.
       with the device plugged in, "No DAQ device found yet" without
 - [ ] Full run: log a test to CSV and XLSX, check `recovery\` copy
 - [ ] Ignition dry run with relay board + buzzer, no igniter
-- [ ] Uninstall is clean (no leftovers in %LOCALAPPDATA% settings)
+- [ ] Uninstall is clean (settings live in the registry: `HKCU\Software\steeman.be\NI USB-6009 Logger`)
 - [ ] SmartScreen shows "Windows protected your PC" → document
       "More info → Run anyway" for users (real fix = code-signing cert)
 
