@@ -17,6 +17,7 @@ def _selftest() -> int:
     devices, problem = daq.enumerate_devices_ex()
     if problem == "driver":
         print("SELFTEST: NI-DAQmx driver NOT available.")
+        print(f"SELFTEST: reason: {daq.last_import_error() or 'unknown'}")
         return 2
     if problem == "service":
         print("SELFTEST: NI-DAQmx installed, but the NI configuration service "

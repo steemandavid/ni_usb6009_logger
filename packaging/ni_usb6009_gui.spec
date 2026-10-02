@@ -7,14 +7,21 @@
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import copy_metadata
+
 PROJECT_ROOT = Path(SPECPATH).parent
 block_cipher = None
+
+# nidaqmx's dependency nitypes reads its own package metadata at import
+# (importlib.metadata); without the dist-info the frozen app dies with
+# "PackageNotFoundError: nitypes" before ever touching the driver DLL.
+datas = sum((copy_metadata(p) for p in ("nidaqmx", "nitypes", "python-decouple")), [])
 
 a = Analysis(
     [str(PROJECT_ROOT / "src" / "ni_usb6009_logger" / "gui" / "app.py")],
     pathex=[str(PROJECT_ROOT / "src")],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=[
         "pyqtgraph",
         "pyqtgraph.graphicsItems.PlotItem.PlotItem",

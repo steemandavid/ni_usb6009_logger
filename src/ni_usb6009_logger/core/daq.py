@@ -72,9 +72,12 @@ def enumerate_devices_ex() -> tuple[list[tuple[str, str]], str | None]:
     dev box: "MAX: (Hex 0x8004032B) The configuration database is not
     running") or "driver" (no usable NI-DAQmx runtime).
     """
+    global _last_import_error
     try:
         nx = backend()
-    except Exception:
+        _last_import_error = None
+    except Exception as e:
+        _last_import_error = f"{type(e).__name__}: {e}"
         return [], "driver"
     try:
         devices = [(d.name, d.product_type)
@@ -93,3 +96,11 @@ def enumerate_devices_ex() -> tuple[list[tuple[str, str]], str | None]:
 def enumerate_devices() -> list[tuple[str, str]]:
     """[(name, product_type)] for every DAQ visible to the driver."""
     return enumerate_devices_ex()[0]
+
+
+_last_import_error = None
+
+
+def last_import_error() -> str | None:
+    """Why backend() last failed to import nidaqmx, for --selftest output."""
+    return _last_import_error

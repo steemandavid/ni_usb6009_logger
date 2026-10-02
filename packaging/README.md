@@ -3,7 +3,12 @@
 ## One-time setup (Windows build machine)
 
 1. Python 3.11+ and `pip install .[gui,excel] pyinstaller`
-2. [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+2. [Inno Setup 6](https://jrsoftware.org/isinfo.php) — `winget install
+   JRSoftware.InnoSetup`; ISCC lands in
+   `%LOCALAPPDATA%\Programs\Inno Setup 6\`. From Git Bash, pass the flags as
+   `MSYS2_ARG_CONV_EXCL="*" ISCC.exe /DAppVersion=1.1.0
+   /DSourceDir=../dist/NI6009Logger packaging/installer.iss` — MSYS rewrites
+   leading-slash args to paths and eats the backslashes otherwise.
 3. *(optional)* NI-DAQmx runtime redistributable from ni.com as
    `packaging/nidaqmx/nidaqmx_setup.exe` so the installer can deploy the
    driver silently (royalty-free redistribution is permitted by NI's
@@ -42,9 +47,13 @@ tab -- the Calibrate tab shipped a crash that the offscreen suite could not see.
 
 ## Phase-6 verification checklist (clean Windows VM)
 
-- [ ] PyInstaller bundle starts; check PyInstaller picked up nidaqmx hooks
-      (if `DriverNotInstalledError` appears *with the driver installed*,
-      add `collect_dynamic_libs("nidaqmx")`-style binaries to the spec)
+- [x] PyInstaller bundle talks to the driver (verified 2026-10-02 on the dev
+      box, simulated device): `NI6009Logger.exe --selftest` → exit 0.
+      The failure mode was **not** DLLs but metadata: `nidaqmx` → `nitypes`
+      reads its own dist-info at import, so the spec now `copy_metadata`s
+      nidaqmx/nitypes/python-decouple. If the bundle ever reports the driver
+      missing again, `--selftest` prints the underlying `reason:` line —
+      rebuild with that before touching `collect_dynamic_libs`.
 - [ ] Installer without the nidaqmx component → app shows the guided
       driver-download dialog
 - [ ] Installer with the component → driver installs **silently**, no

@@ -1,5 +1,64 @@
 # Changelog
 
+## 2026-10-02 (later) — Packaging: frozen-app driver binding fixed; installer built
+
+Second session of the day. NI services hardened, then the Phase-6 packaging
+track on the no-hardware plan. Suite still 62 passing, `flake8` clean.
+
+### NI services now self-heal
+
+`mxssvr` and `nidevldu` have failed to come up after two consecutive reboots,
+so both got failure recovery (restart after 5 s, then 60 s, then 60 s, reset
+daily): `sc failure <svc> reset= 86400 actions= restart/5000/restart/60000/
+restart/60000` from an elevated shell.
+
+### Fixed — the PyInstaller bundle could not load the driver at all (critical)
+
+First-ever bundle build on this machine reproduced the packaging checklist's
+warning exactly: `NI6009Logger.exe --selftest` → *"NI-DAQmx driver NOT
+available"* with the driver installed and working in the venv.
+
+- **Root cause was metadata, not DLLs.** `nidaqmx` → `nitypes` reads its own
+  dist-info via `importlib.metadata` at import; PyInstaller collects no
+  package metadata by default, so the frozen app died with
+  `PackageNotFoundError: No package metadata was found for nitypes` before
+  ever touching `nicaiu.dll`. The spec now `copy_metadata`s nidaqmx,
+  nitypes and python-decouple (the *distribution* name — `copy_metadata
+  ("decouple")` itself raises `PackageNotFoundError`).
+- Finding it took one rebuild instead of guesswork because `--selftest` now
+  prints a `SELFTEST: reason: …` line when the driver is unavailable
+  (`daq.last_import_error()` records why `backend()` failed).
+
+### Built and verified (simulated device `simulated`)
+
+| Artifact / check | Result |
+|---|---|
+| `dist/NI6009Logger` (162 MB onedir) | selftest exit 0, device found |
+| venv `ni_usb6009_gui --selftest` | exit 0 |
+| CLI `--help` redirected (cp1252 guard) | exit 0 |
+| 1000 S/s 2-ch run, `--progress bar` | exit 0, 2000 samples/ch |
+| 50 S/s 0.3 s run (read-timeout guard) | exit 0 |
+| `packaging/Output/NI6009Logger_Setup_1.1.0.exe` (46 MB) | compiles clean; driver component skipped (no `packaging/nadaqmx/nidaqmx_setup.exe`), as designed |
+
+Tooling installed on this machine: PyInstaller 6.22.3 in `.venv`, Inno Setup
+6.7.3 via winget (`%LOCALAPPDATA%\Programs\Inno Setup 6\`).
+
+### Gotchas
+
+- Git Bash mangles Inno flags: `MSYS2_ARG_CONV_EXCL="*"` and forward slashes
+  in `/DSourceDir` (backslashes are eaten) — recorded in `packaging/README.md`.
+- The simulated device writes land in `logs/` (CWD) for CLI runs without
+  `--outfile`; deleted the two CSVs from the regression checks.
+- `NI6009Logger.exe --help` is not a help flag — the windowed exe just opens
+  the GUI (killed it; the encoding check belongs to the CLI entry point).
+
+### Follow-ups
+
+1. Silent-install smoke test of the Setup exe on this box (one UAC prompt),
+   or leave it to the clean-VM pass (FSD §17 item 1).
+2. Release steps unchanged: `NIDAQMX_URL` repo variable, version bump to
+   1.2.0, tag, CI-built installer (FSD §17 item 3).
+
 ## 2026-10-02 — Simulated-device tab walk all-pass; enumeration names a dead config service
 
 Closes FSD §17 items 4 and 5 (both 2026-10-01 follow-ups). Test suite 60 → 62;
