@@ -52,10 +52,30 @@ Tooling installed on this machine: PyInstaller 6.22.3 in `.venv`, Inno Setup
 - `NI6009Logger.exe --help` is not a help flag — the windowed exe just opens
   the GUI (killed it; the encoding check belongs to the CLI entry point).
 
+### Install smoke test on this box (silent round trip, elevated)
+
+| Step | Result |
+|---|---|
+| `Setup_1.1.0.exe /VERYSILENT /SUPPRESSMSGBOXES /TASKS="!runselftest,!desktopicon" /DIR=<tmp>` | exit 0, 937 files |
+| Installed `NI6009Logger.exe --selftest` | *"driver OK, DAQ detected: simulated (USB-6009)"*, exit 0 |
+| `unins000.exe /VERYSILENT` | exit 0; directory, Start-menu group and uninstall key all gone |
+
+The installed frozen app sees the driver *and* the device end to end. Two
+harness gotchas on the way (both mine, both worth remembering):
+
+- `runselftest` defaults to checked and its post-install `MsgBox` is **not**
+  suppressed by `/VERYSILENT` — deselect it in scripted installs.
+- PowerShell `& exe` does not wait for a GUI-subsystem exe: the selftest was
+  still running when the uninstaller started, so every file was "in use" and
+  the uninstaller exited 0 having deleted *nothing* (its log ends
+  `Removed all? No`). Use `Start-Process -Wait` and check the log's last
+  line, not just the exit code.
+
 ### Follow-ups
 
-1. Silent-install smoke test of the Setup exe on this box (one UAC prompt),
-   or leave it to the clean-VM pass (FSD §17 item 1).
+1. Clean-VM verification remains (FSD §17 item 1): installer without/with
+   the NI-DAQmx component, SmartScreen messaging, first-run on a driverless
+   machine.
 2. Release steps unchanged: `NIDAQMX_URL` repo variable, version bump to
    1.2.0, tag, CI-built installer (FSD §17 item 3).
 
