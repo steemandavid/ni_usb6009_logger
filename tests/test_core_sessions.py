@@ -45,6 +45,28 @@ def test_build_config_maps_flags(fake_daq, monkeypatch, tmp_path):
     assert cfg.outfile is None and cfg.logs_dir == Path("logs")
 
 
+# ---------------------------------------------------- enumeration health
+def test_enumeration_names_a_stopped_config_service(fake_daq):
+    """[] must not mean both 'no device' and 'service down' (FSD §17 item 5)."""
+    from ni_usb6009_logger.core import daq
+
+    devices, problem = daq.enumerate_devices_ex()
+    assert devices == [("Dev1", "USB-6009")]
+    assert problem is None
+
+    # What a stopped mxssvr looks like (seen on the dev box, 2026-10-01).
+    # The exception classes must come from the fixture's module handle: the
+    # fixture re-imports the package, so a fresh _fake_nidaqmx import would
+    # raise classes enumerate_devices_ex() cannot recognize.
+    fake_daq.STATE.devices_error = fake_daq.DaqError(
+        "MAX: (Hex 0x8004032B) The configuration database is not running.")
+    assert daq.enumerate_devices_ex() == ([], "service")
+
+    # No NI-DAQmx runtime at all (the Linux dev box):
+    fake_daq.STATE.devices_error = fake_daq.DriverNotInstalledError("no driver")
+    assert daq.enumerate_devices_ex() == ([], "driver")
+
+
 def test_build_config_calibrate_defaults(fake_daq, monkeypatch, tmp_path):
     import ni_usb6009_logger.cli as cli
     monkeypatch.chdir(tmp_path)

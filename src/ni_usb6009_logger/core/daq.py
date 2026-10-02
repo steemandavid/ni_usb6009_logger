@@ -2,8 +2,8 @@
 
 Keeping the import here (and lazy) lets the rest of the package be imported
 on machines without the NI-DAQmx driver — the GUI checks availability via
-driver_available() and shows a friendly dialog instead of crashing, and dev
-on Linux uses NI_USB6009_FAKE=1 to swap in the in-memory fake backend.
+enumerate_devices_ex() and shows a friendly dialog instead of crashing, and
+dev on Linux uses NI_USB6009_FAKE=1 to swap in the in-memory fake backend.
 """
 import os
 import sys
@@ -49,16 +49,6 @@ def safe_stop(task) -> None:
         pass
 
 
-def driver_available() -> bool:
-    """True when the NI-DAQmx driver/runtime is installed and loadable."""
-    try:
-        nx = backend()
-        nx.system.System.local().devices  # touches the driver DLL/services
-        return True
-    except Exception:
-        return False
-
-
 def daq_error_type() -> type[BaseException]:
     """The backend's DaqError class, for front-ends that catch it.
 
@@ -74,11 +64,32 @@ def daq_error_type() -> type[BaseException]:
         return _NeverRaised
 
 
-def enumerate_devices() -> list[tuple[str, str]]:
-    """[(name, product_type)] for every DAQ visible to the driver."""
+def enumerate_devices_ex() -> tuple[list[tuple[str, str]], str | None]:
+    """(devices, problem) — an empty list is not also an empty explanation.
+
+    problem is None (driver healthy), "service" (driver installed but the NI
+    configuration database is unreachable — mxssvr stopped, as seen on the
+    dev box: "MAX: (Hex 0x8004032B) The configuration database is not
+    running") or "driver" (no usable NI-DAQmx runtime).
+    """
     try:
         nx = backend()
-        return [(d.name, d.product_type)
-                for d in nx.system.System.local().devices]
     except Exception:
-        return []
+        return [], "driver"
+    try:
+        devices = [(d.name, d.product_type)
+                   for d in nx.system.System.local().devices]
+        return devices, None
+    except nx.errors.DriverNotInstalledError:
+        return [], "driver"
+    except nx.errors.DaqError:
+        # Enumeration reaching the driver but failing means the driver's
+        # backend services, not the desk, are the problem.
+        return [], "service"
+    except Exception:
+        return [], "driver"
+
+
+def enumerate_devices() -> list[tuple[str, str]]:
+    """[(name, product_type)] for every DAQ visible to the driver."""
+    return enumerate_devices_ex()[0]

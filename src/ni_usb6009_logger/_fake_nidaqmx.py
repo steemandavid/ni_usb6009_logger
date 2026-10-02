@@ -28,6 +28,7 @@ class State:
 
     def __init__(self):
         self.devices = ["Dev1"]          # names of "connected" DAQs
+        self.devices_error = None        # exception raised by device enumeration
         self.ai_voltage_overrides = {}   # "Dev1/ai2" -> volts (constant)
         self.di_values = []              # bools returned by DI reads (cycled)
         self.do_writes = []              # [(lines_tuple, bool_tuple)] per write
@@ -45,6 +46,7 @@ STATE = State()
 
 def reset(devices=None):
     STATE.devices = list(devices) if devices is not None else ["Dev1"]
+    STATE.devices_error = None
     STATE.ai_voltage_overrides = {}
     STATE.di_values = []
     STATE.do_writes = []
@@ -279,6 +281,11 @@ stream_readers.AnalogMultiChannelReader = AnalogMultiChannelReader
 class _SystemLocal:
     @property
     def devices(self):
+        # A stopped NI Configuration Manager (mxssvr) makes the real driver
+        # raise DaqError ("The configuration database is not running") instead
+        # of returning an empty list; STATE.devices_error reproduces that.
+        if STATE.devices_error is not None:
+            raise STATE.devices_error
         return [types.SimpleNamespace(name=d, product_type="USB-6009")
                 for d in STATE.devices]
 

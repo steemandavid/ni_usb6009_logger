@@ -1,5 +1,97 @@
 # Changelog
 
+## 2026-10-02 — Simulated-device tab walk all-pass; enumeration names a dead config service
+
+Closes FSD §17 items 4 and 5 (both 2026-10-01 follow-ups). Test suite 60 → 62;
+`flake8` clean. Both new tests were confirmed to **fail against the previous
+code**.
+
+### NI services were down again after the reboot
+
+`mxssvr` (NI Configuration Manager) was *Stopped* despite *Automatic*, and
+`nidevldu` (NI Device Loader) terminated unexpectedly once at boot (event
+7034, 08:08). NI MAX's "database" complaint is just `mxssvr` being down
+(the linked knowledgebase article is about the service, not a corrupt
+database). Both started from an elevated shell; second occurrence in two
+days — see follow-ups.
+
+### Tab walk against the real NI-DAQmx driver (follow-up 1)
+
+`walk_real_daq.py` (repo root) drives the GUI offscreen against the
+NI-DAQmx simulated device: same pattern as the 2026-10-01 fake-backend walk,
+but through the real driver stack. **All ten flows pass; no app defects
+found.**
+
+| Flow | Result |
+|---|---|
+| Detection → CSV run (301 lines) | PASS |
+| Recovery tab lists `_OK` copy | PASS |
+| XLSX run | PASS |
+| Calibration start/stop (simulated AI −0.30…+0.70 V) | PASS |
+| Ignition defaults → FIRE_PENDING → abort (simulated signal *passes* continuity) | PASS |
+| ARM → FIRE_PENDING → ABORT (DO LOW first and last) | PASS |
+| ARM → FIRE (relay ON 0.5 s → OFF) | PASS |
+| Window close mid-run | PASS |
+| Bogus typed device name (graceful `-200220` in the log pane) | PASS |
+| Mid-run device deletion in NI MAX → interrupted 140 KB recovery copy listed first | PASS |
+
+Harness lessons (the walk's own three failures, all harness bugs):
+
+- A **typed device name survives `rescan()`** by design (the escape hatch);
+  after the bogus-device step the real device must be re-selected or every
+  later run arms against `DevX` → `-200220` "Device Identifier is Invalid".
+- `fire_btn.click()` cannot hold-to-fire: `pressed`/`released` bracket it
+  instantly and the hold rightly cancels. Drive the 50 ms hold timer
+  (`_hold_start()`) with the button `setDown(True)` instead.
+- After `win.close()` mid-run, the queued `finished` signal needs a pumped
+  event loop before `MainWindow.worker` clears — a step that reads it must
+  `processEvents()` first.
+
+### Changed — an empty device list is not also an empty explanation (follow-up 2)
+
+- `core/daq.py`: `enumerate_devices_ex() -> (devices, problem)` with problem
+  `None` / `"service"` / `"driver"`. `DriverNotInstalledError` → `"driver"`;
+  any other `DaqError` → `"service"` (what a stopped `mxssvr` actually
+  raises: `MAX: (Hex 0x8004032B) The configuration database is not running`).
+  `enumerate_devices()` wraps it; `driver_available()` removed (no callers
+  left).
+- GUI status bar now distinguishes: *"NI configuration service not running —
+  start the NI services or reboot the PC (see the README)"* instead of
+  *"No DAQ detected — waiting for device…"* (`DevicePicker.last_problem`).
+- `gui/app.py`: launch shows a service-specific dialog instead of the
+  misleading driver-missing one; `--selftest` names the cause (exit 2 for
+  both, wording differs).
+- Fake: `STATE.devices_error` knob raised by `_SystemLocal.devices`, so CI
+  can reproduce the service-down shape.
+- Test gotcha: exception classes must come from the `fake_daq` **fixture
+  handle** — re-importing `_fake_nidaqmx` inside a test builds a *second*
+  module whose classes `enumerate_devices_ex()` cannot recognize (classified
+  `"driver"`), which is exactly what the first run of the test did.
+- Docs: FSD §5 "NI service down" row, §13 selftest wording, §17 items 4/5
+  struck through; README Errors section leads with the new status-bar text.
+
+### Commits
+
+| SHA | Subject |
+|---|---|
+| `a06d276` | Name a stopped NI config service instead of showing an empty desk |
+
+### Verification
+
+- `--selftest` live (services up, simulated device deleted by the unplug
+  test): *"driver OK, no DAQ device found"*, exit 1.
+- The live service-down branch was **not** re-verified (the UAC prompt to
+  stop `mxssvr` was declined); it is covered by the fake test plus
+  yesterday's real error text.
+
+### Follow-ups
+
+1. Set recovery options (auto-restart) on `mxssvr`/`nidevldu` — the services
+   have now failed to come up after two consecutive reboots.
+2. Recreate `Simulated-usb-6009` in NI MAX when the simulated device is
+   needed again (the unplug test deletes it).
+3. Hardware-only items unchanged (FSD §17 items 1–3).
+
 ## 2026-10-01 — NRSE removed from the GUI; tab walk fixes
 
 Closes FSD §17 items 4 (NRSE) and, on the fake backend, 5 (walk the remaining tabs).

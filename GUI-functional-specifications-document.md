@@ -130,6 +130,7 @@ driver -- it is the only regression guard for §5 and §12 outside hardware.
 | Launch scan | Enumerate all devices via the driver; a unique device is auto-selected and shown in the status bar ("DAQ detected: Dev1 (USB-6009)") |
 | Multiple devices | User picks from the combo (each entry shows name + product type) |
 | No device | Status bar "No DAQ detected — waiting for device…"; Start/ARM disabled; a **Refresh** button and a 2-second automatic rescan keep watching |
+| NI service down | Enumeration raising (e.g. `mxssvr` stopped: "configuration database is not running") is distinguished from an empty desk: status bar "NI configuration service not running — start the NI services or reboot the PC (see the README)". At launch a dialog names the cause instead of the driver-missing one |
 | Hot-plug | Detected within ≤2 s; the combo and status bar update; Start/ARM enable when a device appears |
 | Hot-unplug **mid-run** | The DAQ read raises; the session stops safely (DO forced LOW by the core), a friendly dialog explains what happened and names the output + recovery files; all data written so far is on disk (§10) |
 | Typed name | The device field stays editable so a device not visible to enumeration can be entered manually; typing a name enables Start/ARM even when enumeration returns nothing |
@@ -280,7 +281,8 @@ Rules:
 ## 13. `--selftest` mode (installer integration)
 
 Console mode: `NI6009Logger.exe --selftest` prints one SELFTEST line and exits
-0 (driver OK + device found) / 1 (driver OK, no device) / 2 (driver missing/broken).
+0 (driver OK + device found) / 1 (driver OK, no device) / 2 (driver missing **or
+the NI configuration service not running** — the line says which).
 Used by the installer's post-install verification (§3.1).
 
 ---
@@ -342,8 +344,11 @@ test behind. The `qapp` fixture records hook calls and fails the test.
    relay/buzzer ignition dry run **without an igniter** before first live use.
 3. Set the repo variable `NIDAQMX_URL` to bundle the driver component in CI builds,
    then tag `v1.2.0` to produce the first release installer.
-4. Walk the tabs against the NI **simulated** device (real driver stack). Done on the
-   fake backend 2026-10-01; the simulated-device pass is blocked until the NI
-   Configuration Manager service (`mxssvr`) runs on the dev machine.
-5. When the NI configuration service is stopped, device enumeration fails and the GUI
-   shows "No DAQ detected — waiting for device…" instead of naming the cause.
+4. ~~Walk the tabs against the NI **simulated** device (real driver stack).~~ Done
+   2026-10-02 after starting the NI services: all ten flows pass (CSV/XLSX logging,
+   calibration, ignition ARM→FIRE→ABORT and full FIRE, close mid-run, bogus device
+   name, mid-run device deletion in NI MAX); no defects found.
+5. ~~When the NI configuration service is stopped, device enumeration fails and the GUI
+   shows "No DAQ detected — waiting for device…" instead of naming the cause.~~ Fixed
+   2026-10-02: enumeration reports *why* it is empty (§5 "NI service down"), in the
+   status bar, the launch dialog and `--selftest`.

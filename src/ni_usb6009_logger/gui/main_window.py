@@ -431,10 +431,17 @@ class MainWindow(QMainWindow):
         self._device_present = bool(devices)
         self._device_names = [n for n, _ in devices]
         self._update_start_enabled()
+        problem = self.device_picker.last_problem
         if len(devices) == 1:
             self.statusBar().showMessage(f"DAQ detected: {devices[0][0]} ({devices[0][1]})")
         elif not devices:
-            self.statusBar().showMessage("No DAQ detected — waiting for device…")
+            if problem == "service":
+                # The NI services being down read as an empty desk otherwise.
+                self.statusBar().showMessage(
+                    "NI configuration service not running — start the NI "
+                    "services or reboot the PC (see the README)")
+            else:
+                self.statusBar().showMessage("No DAQ detected — waiting for device…")
 
     def _on_device_typed(self, name):
         # Only user edits reach here: rescan() sets the text with signals

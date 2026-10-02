@@ -380,6 +380,17 @@ def test_settings_stay_out_of_the_real_profile(qapp):
     assert gsettings._settings().fileName().endswith(".ini")
 
 
+def test_stopped_service_is_named_not_no_daq(qapp, fake_daq):
+    """A dead mxssvr must not read as an empty desk (FSD §17 item 5)."""
+    fake_daq.STATE.devices_error = fake_daq.DaqError(
+        "MAX: (Hex 0x8004032B) The configuration database is not running.")
+    win = MainWindowFactory(qapp, fake_daq)
+    msg = win.statusBar().currentMessage()
+    assert "configuration service" in msg.lower(), msg
+    assert "No DAQ detected" not in msg
+    win.close()
+
+
 def test_config_error_is_refused_before_the_run(qapp, fake_daq, tmp_path, monkeypatch):
     # Validated in the worker, a bad setting read as "Something went wrong
     # during the test ... data recorded so far is safe", in CLI flag names.

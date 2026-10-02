@@ -11,6 +11,9 @@ class DevicePicker(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # None, "service" or "driver" from the last rescan — an empty device
+        # list alone cannot say which (FSD §17 item 5).
+        self.last_problem = None
         self.combo = QComboBox()
         self.combo.setEditable(True)
         self.combo.editTextChanged.connect(
@@ -25,7 +28,7 @@ class DevicePicker(QWidget):
         lay.addWidget(refresh)
 
     def rescan(self):
-        devices = daq.enumerate_devices()
+        devices, self.last_problem = daq.enumerate_devices_ex()
         current = self.current_device()
         self.combo.blockSignals(True)
         self.combo.clear()

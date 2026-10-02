@@ -174,6 +174,10 @@ Two options, in increasing fidelity:
 ---
 ## Errors
 
+When the app's status bar says **"NI configuration service not running"**, or
+`--selftest` prints the same, the NI services are down — not the driver, and
+not a missing device. Same fix as below:
+
 ```
 nidaqmx.errors.DaqError: Internal Software Error occurred in MIG software. Please contact National Instruments Support.
 ```

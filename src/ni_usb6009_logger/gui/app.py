@@ -14,11 +14,14 @@ NI_DRIVER_URL = "https://www.ni.com/en/shop/model/ni-daqmx.html"
 
 
 def _selftest() -> int:
-    ok = daq.driver_available()
-    if not ok:
+    devices, problem = daq.enumerate_devices_ex()
+    if problem == "driver":
         print("SELFTEST: NI-DAQmx driver NOT available.")
         return 2
-    devices = daq.enumerate_devices()
+    if problem == "service":
+        print("SELFTEST: NI-DAQmx installed, but the NI configuration service "
+              "is not running (start the NI services or reboot the PC).")
+        return 2
     if devices:
         names = ", ".join(f"{n} ({p})" for n, p in devices)
         print(f"SELFTEST: driver OK, DAQ detected: {names}")
@@ -61,7 +64,18 @@ def main(argv=None) -> int:
     app.setApplicationName("NI USB-6009 Logger")
     app.setOrganizationName("steeman.be")
 
-    if not daq.driver_available():
+    _devices, problem = daq.enumerate_devices_ex()
+    if problem == "service":
+        # Seen on the dev box: mxssvr stopped makes the driver look missing,
+        # and "install NI-DAQmx" advice sends the user down the wrong path.
+        QMessageBox.critical(
+            None, "NI services not running",
+            "The NI configuration service is not running, so the app cannot\n"
+            "see any DAQ device.\n\n"
+            "Start the NI services (as administrator) or reboot the PC, then\n"
+            "start this app again. See the README's troubleshooting section.")
+        return 1
+    if problem == "driver":
         box = QMessageBox()
         box.setIcon(QMessageBox.Critical)
         box.setWindowTitle("NI-DAQmx driver missing")
