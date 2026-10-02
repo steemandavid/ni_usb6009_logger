@@ -74,7 +74,7 @@ Harness lessons (the walk's own three failures, all harness bugs):
 
 | SHA | Subject |
 |---|---|
-| `a06d276` | Name a stopped NI config service instead of showing an empty desk |
+| `89bb4bf` | Name a stopped NI config service instead of showing an empty desk |
 
 ### Verification
 
