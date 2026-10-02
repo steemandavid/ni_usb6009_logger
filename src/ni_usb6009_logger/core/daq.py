@@ -49,6 +49,19 @@ def safe_stop(task) -> None:
         pass
 
 
+def normalize_di_read(vals) -> list:
+    """A DI task read as a list, whatever shape the driver returned.
+
+    DAQmx unwraps single-channel reads: one DI line yields a bare bool,
+    multiple lines a list. Iterating the raw return crashed the per-chunk
+    DI snapshot on real hardware (the fake always returned a list), so
+    every DI read goes through here.
+    """
+    if isinstance(vals, (list, tuple)):
+        return list(vals)
+    return [vals]
+
+
 def daq_error_type() -> type[BaseException]:
     """The backend's DaqError class, for front-ends that catch it.
 

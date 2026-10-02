@@ -85,6 +85,25 @@ def test_calibration_screen_only(run_cli, capsys, tmp_path):
     assert not list(tmp_path.glob("logs/**")), "calibration writes no files"
 
 
+def test_calibrate_single_di_line(run_cli, fake_daq, capsys, tmp_path):
+    """Calibration snapshots DI too; one line yields a bare bool (DAQmx)."""
+    import _thread
+    import threading
+    stopper = threading.Timer(1.0, _thread.interrupt_main)
+    stopper.start()
+    try:
+        rc = run_cli("--device", "Dev1", "--channels", "ai0",
+                     "--digital", "port0/line0",
+                     "--calibrate", "--calib-sample-rate", "50",
+                     "--rate", "5")
+    finally:
+        stopper.cancel()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Calibration mode: screen-only live readout (no file)." in out
+    assert "ERROR" not in out
+
+
 def test_calibrate_plus_ignite_rejected(run_cli, capsys):
     rc = run_cli("--channels", "ai0", "--calibrate", "--ignite",
                  "--buzzer-line", "port1/line0", "--igniter-line", "port1/line1")

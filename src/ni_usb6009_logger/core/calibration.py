@@ -125,8 +125,8 @@ class CalibrationSession:
                     avgs = [sum(h) / len(h) if len(h) > 0 else 0.0 for h in hist]
                     ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now))
                     if di_task:
-                        di_vals = di_task.read()
-                        di_vals = [1 if bool(v) else 0 for v in di_vals]
+                        di_vals = [1 if bool(v) else 0
+                                   for v in daq.normalize_di_read(di_task.read())]
                     else:
                         di_vals = []
                     raw_vals = ai_buf[:, -1].tolist() if cal.show_raw else None

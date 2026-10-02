@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-10-02 (evening, cont. 2) — The same TypeError, now on the Calibrate tab
+
+Third real-user report: after reinstalling the previous fix, Start on the
+**Calibrate** tab hit the identical `TypeError: 'bool' object is not
+iterable`. `calibration.py` had a *copy* of the DI-snapshot pattern fixed
+in `session.py` an hour earlier — the fix was applied to one site and the
+duplicate was missed. Suite 64 → 65, `flake8` clean, new test confirmed
+failing first, then verified against the real driver (calibration with
+`port0/line0`: DONE, `di: [0]`).
+
+### Fixed — one shared normalizer instead of two copies
+
+`daq.normalize_di_read()` now wraps every DI read (bare bool or list), and
+both sessions use it. The duplication itself was the defect-enabler: a
+shape quirk fixed in one file stayed live in its copy.
+
+### Follow-ups
+
+- Reinstall from the rebuilt `packaging/Output/NI6009Logger_Setup_1.1.0.exe`
+  (all three of today's user-reported fixes).
+
 ## 2026-10-02 (evening, cont.) — Single DI line crashed the run (TypeError)
 
 Second real-user report of the day, one hour after the first: with exactly

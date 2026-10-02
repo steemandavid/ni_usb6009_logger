@@ -303,14 +303,11 @@ class LoggingSession:
                             if i_now_ma < ign.fire_confirm_ma:
                                 rep.on_status("WARNING: Ignition current below confirm threshold – check wiring/supply/igniter.")
 
-                        # DI snapshot once per chunk. DAQmx unwraps a
-                        # single-channel digital read to a bare bool; only
-                        # multiple lines come back as a list.
+                        # DI snapshot once per chunk (DAQmx returns a bare
+                        # bool for a single line; normalize_di_read wraps it).
                         if di_task:
-                            di_vals = di_task.read()
-                            if not isinstance(di_vals, (list, tuple)):
-                                di_vals = [di_vals]
-                            di_vals = [1 if bool(v) else 0 for v in di_vals]
+                            di_vals = [1 if bool(v) else 0
+                                       for v in daq.normalize_di_read(di_task.read())]
                         else:
                             di_vals = []
 
