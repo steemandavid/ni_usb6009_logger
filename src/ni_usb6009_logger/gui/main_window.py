@@ -56,6 +56,7 @@ _CLI_TO_GUI = (
     ("--sense-term", "Sense term config"),
     ("--term", "Term config"),
     ("--rate", "the sample rate"),
+    ("--digital", "DI lines"),
     ("--buzzer-line", "Buzzer DO line"),
     ("--igniter-line", "Igniter relay DO line"),
     ("--ignite", "Ignition"),

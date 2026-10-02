@@ -271,6 +271,7 @@ Rules:
 | Ignition setup failure (DO task) | Error dialog (historic CLI exit code 3 equivalent) |
 | Rate x channels over 48 kS/s | Rejected before the task is created; message names the per-channel maximum |
 | DIFF on ai4-ai7 (Term config or Sense term config) | Rejected before the task is created; message names the usable channels |
+| Digital line names (DI lines, buzzer/relay DO) | Rejected before the task is created unless they are `port0/line0-7` / `port1/line0-3`; a bare `D0` used to die mid-run with `-200170` |
 | Any invalid setting (range, rate, empty channel list, missing DO lines) | "Cannot start" / "Cannot arm" dialog **before** a session starts, naming the GUI field — never the mid-test "something went wrong" dialog |
 | Recovery **Copy to…** fails | "Copy failed" dialog with the OS message |
 | Any other configuration the driver refuses | `DAQ driver error:` plus NI's own text, which names the property and its permitted range |

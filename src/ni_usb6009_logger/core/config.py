@@ -19,6 +19,9 @@ AI_DIFF_CHANNELS = ("ai0", "ai1", "ai2", "ai3")  # ai4-ai7 are RSE-only
 AI_SUPPORTED_TERMS = ("RSE", "DIFF")  # NRSE is accepted by argparse but not
 #                                       by this device: ai_term_cfgs lists
 #                                       only RSE and DIFF on every channel.
+# di_lines / do_lines: the whole DIO surface is port0/line0-7 + port1/line0-3.
+DI_PORT_LINES = {"port0": 8, "port1": 4}
+_DI_LINE_RE = re.compile(r"(port\d+)/(line\d+)")
 
 
 class ConfigError(Exception):
@@ -119,6 +122,31 @@ def _check_terminal_config(term: str, channels: list[str], what: str) -> None:
         )
 
 
+def _check_digital_line(line: str, what: str) -> None:
+    """Reject line names the driver refuses with -200170 mid-run.
+
+    A bare 'D0' looks reasonable to a user (and the fake backend accepts
+    anything), but the real driver raises "Physical channel specified does
+    not exist on this device" only once the task is built -- i.e. after the
+    run dialog. Catch it here, before anything starts.
+    """
+    m = _DI_LINE_RE.fullmatch(line)
+    if m is None:
+        raise ConfigError(
+            f"Error: {line!r} is not a line name the USB-6009 understands "
+            f"({what}). Digital lines are written as port/line, e.g. "
+            f"port0/line0 or port0/line0:7.",
+            exit_code=2,
+        )
+    port, ln = m.group(1), int(m.group(2)[4:])
+    if ln >= DI_PORT_LINES.get(port, 0):
+        raise ConfigError(
+            f"Error: {line} does not exist on the USB-6009 ({what}). "
+            f"Available: port0/line0-7 and port1/line0-3.",
+            exit_code=2,
+        )
+
+
 def validate(cfg: LoggerConfig) -> None:
     """Raise ConfigError for invalid combinations (order matches the old CLI)."""
     if not cfg.channels:
@@ -141,6 +169,8 @@ def validate(cfg: LoggerConfig) -> None:
             exit_code=2,
         )
     _check_terminal_config(cfg.term, cfg.channels, "--term")
+    for line in cfg.digital_lines:
+        _check_digital_line(line, "--digital")
     if cfg.calibration and cfg.calibration.sample_rate <= 0:
         raise ConfigError(
             "Error: the calibration sample rate must be greater than 0 Hz.", exit_code=2)
@@ -161,3 +191,6 @@ def validate(cfg: LoggerConfig) -> None:
         # single-ended-only channel.
         _check_terminal_config(cfg.ignition.sense_term,
                                [cfg.ignition.sense_ai], "--sense-term")
+    if cfg.ignition:
+        _check_digital_line(cfg.ignition.buzzer_line, "--buzzer-line")
+        _check_digital_line(cfg.ignition.igniter_line, "--igniter-line")

@@ -90,6 +90,28 @@ def test_validate_rejects(fake_daq):
     assert e.value.exit_code == 2
 
 
+def test_validate_rejects_unusable_digital_lines(fake_daq):
+    """'D0' looks reasonable to a user and cost a -200170 mid-run error."""
+    for bad in (["D0"], ["port0/line0", "D1"], ["port1/line4"], ["port2/line0"]):
+        with pytest.raises(ConfigError) as e:
+            validate(LoggerConfig(channels=["ai0"], digital_lines=bad))
+        assert "--digital" in str(e.value), bad
+        assert e.value.exit_code == 2
+
+    # the same shape for the ignition DO lines
+    with pytest.raises(ConfigError) as e:
+        validate(LoggerConfig(
+            channels=["ai0"],
+            ignition=IgnitionConfig(buzzer_line="D0", igniter_line="port1/line0")))
+    assert "--buzzer-line" in str(e.value)
+
+    # valid names still pass
+    validate(LoggerConfig(channels=["ai0"],
+                          digital_lines=["port0/line0", "port0/line7", "port1/line3"],
+                          ignition=IgnitionConfig(buzzer_line="port1/line1",
+                                                  igniter_line="port1/line0")))
+
+
 # ------------------------------------------------------- recovery dual-write
 def _logging_cfg(tmp_path, **kw):
     return LoggerConfig(

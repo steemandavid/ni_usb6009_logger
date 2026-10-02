@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-10-02 (evening) — First real-user defect: 'D0' in DI lines died mid-run
+
+The installer was run on this machine for real: no driver issues, app runs.
+Typing `D0` into **DI lines** (a natural guess) and pressing Start produced
+a mid-run `DaqError -200170` ("Physical channel specified does not exist on
+this device") instead of a friendly pre-start refusal. The fake backend
+accepts any channel string, so CI could never see it. Suite 62 → 63,
+`flake8` clean; the new test confirmed failing first.
+
+### Fixed — digital line names are validated before anything starts
+
+- `config._check_digital_line()` rejects anything that is not
+  `port0/line0-7` or `port1/line0-3` (the device's whole DIO surface, read
+  back from `di_lines`/`do_lines`) with a message that shows the correct
+  syntax. Applied to `--digital` and to the ignition buzzer/relay lines.
+- GUI wording maps `--digital` → "DI lines" (`_CLI_TO_GUI`), so the
+  "Cannot start" dialog names the field: *"'D0' is not a line name the
+  USB-6009 understands (DI lines)…"*.
+- Bundle + installer rebuilt with the fix.
+
+### Follow-ups
+
+- The installed copy on this machine predates the fix; reinstall from the
+  rebuilt `packaging/Output/NI6009Logger_Setup_1.1.0.exe` (or just don't
+  type `D0` — the DI lines field may stay empty).
+
 ## 2026-10-02 (later) — Packaging: frozen-app driver binding fixed; installer built
 
 Second session of the day. NI services hardened, then the Phase-6 packaging
