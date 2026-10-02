@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-10-02 (evening, cont.) — Single DI line crashed the run (TypeError)
+
+Second real-user report of the day, one hour after the first: with exactly
+one DI line (`port0/line0`), Start died with `TypeError: 'bool' object is
+not iterable`. Suite 63 → 64, `flake8` clean, new test confirmed failing
+first, then verified against the real driver.
+
+### Fixed — DAQmx unwraps single-channel DI reads to a bare bool
+
+`session.py`'s per-chunk DI snapshot iterated `di_task.read()`, which is a
+list only for multiple lines; one line yields a bare `bool`. The fake
+always returned a list — the same fake-is-more-permissive blind spot as
+the `System` attribute (2026-09-20), now closed for this read shape: the
+fake mirrors the unwrap, and the session normalizes either shape before
+iterating.
+
+### Follow-ups
+
+- Reinstall from the rebuilt `packaging/Output/NI6009Logger_Setup_1.1.0.exe`
+  (contains both of today's user-reported fixes).
+
 ## 2026-10-02 (evening) — First real-user defect: 'D0' in DI lines died mid-run
 
 The installer was run on this machine for real: no driver issues, app runs.

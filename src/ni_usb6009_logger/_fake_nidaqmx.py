@@ -225,7 +225,11 @@ class Task:
         if self._di:
             n = len(self._di)
             src = STATE.di_values or [False]
-            return [bool(src[i % len(src)]) for i in range(n)]
+            vals = [bool(src[i % len(src)]) for i in range(n)]
+            # The real driver unwraps single-channel reads: one DI line
+            # yields a bare bool, not a list (that shape difference crashed
+            # the session's per-chunk DI snapshot on real hardware).
+            return vals[0] if n == 1 else vals
         if self._ai:
             if number_of_samples_per_channel == 1:
                 return self._read_ai_sample(0)

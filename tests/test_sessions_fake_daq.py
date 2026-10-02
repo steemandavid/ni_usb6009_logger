@@ -40,6 +40,20 @@ def test_logging_csv_content(run_cli, fake_daq, tmp_path):
         assert row[4:] == ["0", "0"], "DI defaults to LOW"
 
 
+def test_logging_single_di_line(run_cli, fake_daq, tmp_path):
+    """One DI line: the real driver's read() returns a bare bool, not a list."""
+    rc = run_cli(
+        "--device", "Dev1", "--channels", "ai0",
+        "--digital", "port0/line0",
+        "--rate", "100", "--chunk", "10",
+        "--outfile", "run.csv", "--duration", "0.2", "--progress", "none",
+    )
+    assert rc == 0
+    rows = _read_rows(tmp_path / "run.csv")
+    assert rows[0][-1] == "di_port0_line0"
+    assert all(r[-1] == "0" for r in rows[1:]), "DI defaults to LOW"
+
+
 def test_logging_auto_named_no_overwrite(run_cli, tmp_path):
     for _ in range(2):
         rc = run_cli("--device", "Dev1", "--channels", "ai0",
