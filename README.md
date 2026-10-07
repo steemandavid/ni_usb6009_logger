@@ -11,6 +11,8 @@ Supports:
 - **Calibration mode**: screen-only output with moving average filtering.
 - **Ignition mode**: buzzer pre-warning, relay pulse, with **current-sense failsafe** using a shunt resistor.
 
+**User manual:** [English](docs/USER-MANUAL.en.md) · [Nederlands](docs/USER-MANUAL.nl.md)
+
 Tested on **Windows 10/11**, **Python 3.10/3.11**, with **NI-DAQmx runtime** installed.
 
 ---

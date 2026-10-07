@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-10-07 — User manual (English + Dutch)
+
+No code changes. Added a full end-user manual, written from the README, the GUI
+functional spec, `installer.iss`, the CLI golden help and the GUI source.
+
+### Added
+
+- `docs/USER-MANUAL.en.md` and `docs/USER-MANUAL.nl.md` (17 chapters each):
+  safety, USB-6009 terminal table and AI/DI/ignition wiring, installer walkthrough
+  and self-test results, every GUI field with defaults, Log / Calibrate / Ignite /
+  Recovery tabs, live plot, recovery files, CLI option table, troubleshooting,
+  uninstall, limits. Dutch keeps on-screen labels in English.
+- README now links to both manuals.
+
+### Notes
+
+- The USB-6009 terminal numbering comes from general device knowledge, not the repo;
+  verify against the device label.
+- The Ignite "Sense term config" GUI default is assumed RSE (not set explicitly in
+  code); the CLI default is DIFF — noted in the manual.
+- Installer behaviour (silent driver install, SmartScreen) is described from the
+  script; still unverified on a clean VM per the Phase-6 checklist.
+
 ## 2026-10-02 (evening, cont. 2) — The same TypeError, now on the Calibrate tab
 
 Third real-user report: after reinstalling the previous fix, Start on the
