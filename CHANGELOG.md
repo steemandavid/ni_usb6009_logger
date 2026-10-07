@@ -23,6 +23,17 @@ functional spec, `installer.iss`, the CLI golden help and the GUI source.
 - Installer behaviour (silent driver install, SmartScreen) is described from the
   script; still unverified on a clean VM per the Phase-6 checklist.
 
+### Added (later, same day) — PDF manuals and a rebuilt installer
+
+- `docs/USER-MANUAL.en.pdf` / `docs/USER-MANUAL.nl.pdf`: rendered from the Markdown
+  with markdown-it-py + headless Chrome `--print-to-pdf` (no pandoc/LaTeX on this box).
+- Rebuilt the PyInstaller bundle (`dist/NI6009Logger`) and the installer
+  `packaging/Output/NI6009Logger_Setup_1.1.0.exe` (47.7 MB; build output is gitignored,
+  not committed). Bundle `--selftest` against the simulated device: exit 0.
+- Gotcha: from Git Bash, `/DSourceDir=..\dist\...` loses its backslashes even with
+  `MSYS2_ARG_CONV_EXCL`; run ISCC from PowerShell with the argument single-quoted.
+- The installer itself was built but not run; the clean-VM checklist is still open.
+
 ## 2026-10-02 (evening, cont. 2) — The same TypeError, now on the Calibrate tab
 
 Third real-user report: after reinstalling the previous fix, Start on the
