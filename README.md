@@ -10,10 +10,62 @@ Supports:
   time is when its sample was acquired, not when the read returned.
 - **Calibration mode**: screen-only output with moving average filtering.
 - **Ignition mode**: buzzer pre-warning, relay pulse, with **current-sense failsafe** using a shunt resistor.
+- A **desktop GUI** (`ni_usb6009_gui`) with live plotting that offers all of the above; see [Graphical app](#graphical-app-gui).
 
 **User manual:** [English](docs/USER-MANUAL.en.md) · [Nederlands](docs/USER-MANUAL.nl.md)
 
 Tested on **Windows 10/11**, **Python 3.10/3.11**, with **NI-DAQmx runtime** installed.
+
+---
+
+## Graphical app (GUI)
+
+Besides the command line, there is a stand-alone Windows desktop app,
+`ni_usb6009_gui`, built on PySide6 and PyQtGraph. It has full parity with the CLI
+(both share one core) and is aimed at operators who should not need a terminal.
+
+![NI USB-6009 Logger GUI: live plot of three analog channels on the Log tab](docs/images/gui-log-tab.png)
+
+*The Log tab mid-run. The screenshot was captured headless against the built-in
+fake DAQ backend, so the sine waves are synthetic test data, not a real measurement.*
+
+**What it offers**
+
+- **Device auto-detection** with continuous monitoring: plug in the USB-6009 and it
+  appears in the device box.
+- **Config panel** (all modes): DAQ device, AI channels, DI lines, sample rate, chunk
+  size, terminal config, AI range, duration.
+- **Log tab**: logs AI/DI to CSV or XLSX with a **live plot** of every channel
+  (follow live / pause view). An output file must be chosen first, and existing
+  files are never overwritten.
+- **Calibrate tab**: screen-only moving-average readout, no file written.
+- **Ignite tab**: buzzer pre-warning and relay pulse with the same current-sense
+  failsafes as the CLI, driven through an **ARM, hold-to-FIRE, ABORT** flow with
+  status LEDs. Closing the window mid-run aborts safely and forces the DO lines LOW.
+- **Recovery tab**: every logging run also writes a parallel recovery CSV; interrupted
+  runs are listed so the partial data can be copied out.
+- Settings persist between launches, and errors are shown as plain-language dialogs
+  rather than tracebacks.
+
+**Install and run**
+
+```powershell
+pip install -e .[gui,excel]
+ni_usb6009_gui              # start the app
+ni_usb6009_gui --selftest   # exit 0 = driver + device OK, 1 = no device, 2 = no driver
+```
+
+Windows users can instead use the Inno Setup installer built from
+[`packaging/`](packaging/README.md) (Next-Next-Finish, optional silent NI-DAQmx
+driver install). If the NI-DAQmx driver is missing, the app explains this and links to
+the download page.
+
+To try the GUI without hardware or a driver, set `NI_USB6009_FAKE=1` before starting
+it (see *Testing without hardware* below).
+
+Step-by-step operator instructions are in the [user manual](docs/USER-MANUAL.en.md)
+(also [Dutch](docs/USER-MANUAL.nl.md)). Full behaviour is specified in the
+[GUI functional specifications](GUI-functional-specifications-document.md).
 
 ---
 

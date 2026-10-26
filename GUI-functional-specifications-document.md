@@ -96,6 +96,10 @@ driver -- it is the only regression guard for §5 and §12 outside hardware.
 
 ## 4. Main window layout
 
+![Log tab mid-run (fake DAQ backend, synthetic signal)](docs/images/gui-log-tab.png)
+
+Schematic:
+
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ NI USB-6009 Logger — v<x.y.z>                                    [status bar]│

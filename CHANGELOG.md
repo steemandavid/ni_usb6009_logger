@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-26 — GUI documentation and README screenshot
+
+- README: new **Graphical app (GUI)** section with a screenshot of the Log tab, a
+  feature overview, install/run/`--selftest` commands and a link to the installer
+  and the functional specification; the GUI is also listed in the feature bullets.
+- Screenshot (`docs/images/gui-log-tab.png`) was captured headless
+  (`QT_QPA_PLATFORM=offscreen`) against the fake DAQ backend, so the traces are
+  synthetic sine waves. It is also embedded in the GUI functional specification §4.
+- Documentation only; no code changes.
 ## 2026-10-07 — User manual (English + Dutch)
 
 No code changes. Added a full end-user manual, written from the README, the GUI
